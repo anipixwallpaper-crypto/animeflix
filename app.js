@@ -20,7 +20,7 @@
   function saveS(){ localStorage.setItem(LS, JSON.stringify(S)); }
 
   // ---------- stream/thumb URL helpers (preview me patch hote hain) ----------
-  function streamUrl(epId){ return "/api/stream/" + epId; }
+  function streamUrl(epId,q){ return "/api/stream/" + epId + (q ? "?q=" + encodeURIComponent(q) : ""); }
   function thumbUrl(plId){ return "/api/thumb/" + plId; }
 
   // ---------- helpers ----------
@@ -458,7 +458,9 @@
     const pw=document.createElement("div"); pw.className="player-wrap";
     const v=document.createElement("video");
     v.id="player"; v.controls=true; v.playsInline=true; v.preload="metadata";
-    v.src=streamUrl(e.id);
+    const quals=e.qualities||[];
+    let curQ=quals[0]||"";
+    v.src=streamUrl(e.id,curQ);
     const ov=document.createElement("div"); ov.id="playOverlay"; ov.innerHTML='<div class="big">▶</div>';
     ov.classList.add("hidden");
     const tryPlay=()=>{ v.play().then(()=>ov.classList.add("hidden")).catch(()=>{
@@ -468,7 +470,10 @@
     pw.append(v,ov);
 
     const h=S.history["e"+e.id];
-    v.addEventListener("loadedmetadata",()=>{ if(h&&h.pos>5&&h.pos<v.duration*0.95){ try{v.currentTime=h.pos;}catch(err){} } });
+    let qswitch=false, qpos=0, qplaying=false;
+    v.addEventListener("loadedmetadata",()=>{
+      if(qswitch){ qswitch=false; try{v.currentTime=qpos;}catch(err){} if(qplaying) tryPlay(); return; }
+      if(h&&h.pos>5&&h.pos<v.duration*0.95){ try{v.currentTime=h.pos;}catch(err){} } });
     v.addEventListener("play",()=>ov.classList.add("hidden"));
     v.addEventListener("error",()=>{
       if(window.AF_NEXT_URL){ const nu=window.AF_NEXT_URL(v.currentSrc); if(nu){ v.src=nu; tryPlay(); return; } }
@@ -479,6 +484,25 @@
     v.addEventListener("timeupdate",()=>{ const n=Date.now(); if(n-lastSave>4000){ lastSave=n; saveProgress(); } });
     col.appendChild(pw);
 
+    if(quals.length>1){
+      const qb=document.createElement("div"); qb.className="qbar";
+      quals.forEach(q=>{
+        const b=document.createElement("button");
+        b.className="qchip"+(q===curQ?" on":""); b.textContent=q;
+        b.onclick=()=>{
+          if(q===curQ) return;
+          qpos=v.currentTime; qplaying=!v.paused; qswitch=true;
+          curQ=q; v.src=streamUrl(e.id,curQ); dl.href=streamUrl(e.id,curQ)+"?download=1";
+          qb.querySelectorAll(".qchip").forEach(x=>x.classList.remove("on"));
+          b.classList.add("on");
+        };
+        qb.appendChild(b);
+      });
+      const lab=document.createElement("span"); lab.className="qlab"; lab.textContent="Quality:";
+      qb.prepend(lab);
+      col.appendChild(qb);
+    }
+
     const ttl=document.createElement("h1"); ttl.className="w-title"; ttl.textContent=e.title;
     const meta=document.createElement("div"); meta.className="w-meta";
     meta.textContent=d.title+" · S"+e.season+" E"+e.ep_num+" · "+fmtViews(e.views+1);
@@ -488,7 +512,7 @@
     const prev=document.createElement("button"); prev.className="btn ghost small"; prev.textContent="⏮ Prev"; prev.onclick=prevEpisode;
     const nextB=document.createElement("button"); nextB.className="btn accent small"; nextB.textContent="Next ⏭"; nextB.onclick=nextEpisode;
     const dl=document.createElement("a"); dl.className="btn ghost small"; dl.textContent="⬇ Download";
-    dl.href=streamUrl(e.id)+"?download=1";
+    dl.href=streamUrl(e.id,curQ)+"?download=1";
     const wl=document.createElement("button"); wl.className="btn ghost small";
     wl.textContent=S.later.includes(d.id)?"🔖 Saved":"🔖 Save";
     wl.onclick=()=>{ if(S.later.includes(d.id))S.later=S.later.filter(x=>x!==d.id); else S.later.push(d.id);
@@ -602,11 +626,17 @@
     readThumb(f,(d)=>{ pendingThumb=d; $("thumbPrev").innerHTML='<img src="'+d+'">'; });
   });
   $("addBtn").onclick=async ()=>{
-    const link=$("addLink").value.trim();
+    const l480=$("addLink480").value.trim(), l720=$("addLink720").value.trim(), l1080=$("addLink1080").value.trim();
+    const link=l480||l720||l1080;
+    const items=[];
+    if(l480) items.push({label:"480p", link:l480});
+    if(l720) items.push({label:"720p", link:l720});
+    if(l1080) items.push({label:"1080p", link:l1080});
+    if(!items.length){ $("linkErr").textContent="Kam se kam ek Telegram link daalo (480p/720p/1080p)"; return; }
     $("linkErr").textContent=""; $("addErr").textContent="";
     const btn=$("addBtn"); btn.disabled=true; btn.textContent="Checking…";
     try{
-      const body={ link, season:Number($("addSeason").value||1), ep_num:Number($("addEpNum").value||1),
+      const body={ links:items, season:Number($("addSeason").value||1), ep_num:Number($("addEpNum").value||1),
         title:$("addEpTitle").value.trim() };
       if($("addPlaylist").value==="new"){
         const t=$("newPlTitle").value.trim();
@@ -617,7 +647,7 @@
       const r=await api("/api/add",{json:body});
       toast("✅ Episode add ho gaya!");
       $("addModal").classList.add("hidden");
-      $("addLink").value=""; $("addEpTitle").value="";
+      $("addLink480").value=""; $("addLink720").value=""; $("addLink1080").value=""; $("addEpTitle").value="";
       $("addSeason").value=1; $("addEpNum").value=1;
       await refresh();
       goWatch(r.playlist_id, body.season, body.ep_num);

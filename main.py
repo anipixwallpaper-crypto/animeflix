@@ -189,11 +189,22 @@ async def api_playlists():
     ]
 
 
+def _ep_qualities(e):
+    """Episode ke available quality labels (multi-quality)."""
+    try:
+        import json as _j
+        srcs = _j.loads(e.sources_json or "[]")
+        return [s.get("label", "Original") for s in srcs if isinstance(s, dict)]
+    except Exception:
+        return []
+
+
 def ep_row(e):
     return {
         "id": e.id, "playlist_id": e.playlist_id, "season": e.season, "ep_num": e.ep_num,
         "title": e.title, "size": e.size, "duration": e.duration, "views": e.views,
         "has_link": bool(e.ref),
+        "qualities": _ep_qualities(e),
     }
 
 
@@ -356,18 +367,58 @@ async def api_add(request: Request):
             if not await s.get(Playlist, playlist_id):
                 raise HTTPException(status_code=400, detail="Playlist select karo")
 
-    result, err, _ = await tg.fetch_episode_media(link)
-    if err:
-        raise HTTPException(status_code=400, detail=err)
-    client, msg, media = result
-    # bot_index dhundo
+    # ---- multi-quality links (480p/720p/1080p) + legacy single link ----
+    def _qnum(lbl):
+        m = re.search(r"(\d{3,4})\s*p", str(lbl), re.I)
+        return int(m.group(1)) if m else 0
+
+    items = []
+    for it in (body.get("links") or []):
+        l = (it.get("link") or "").strip()
+        if l:
+            items.append(((it.get("label") or "Original"), l))
+    if not items and link:
+        items.append(("Original", link))
+    if not items:
+        raise HTTPException(status_code=400, detail="Kam se kam ek Telegram link daalo (480p/720p/1080p)")
+    # sabse pehle high quality (Auto default = best)
+    items.sort(key=lambda x: _qnum(x[0]), reverse=True)
+
+    sources = []
+    primary = None
+    for label, l in items:
+        result, err, _ = await tg.fetch_episode_media(l)
+        if err:
+            raise HTTPException(status_code=400, detail=f"{label}: {err}")
+        client, msg, media = result
+        bot_index = None
+        for i, c in tg.clients.items():
+            if c is client:
+                bot_index = i
+                break
+        sources.append({
+            "label": label, "chat_id": msg.chat.id, "message_id": msg.id,
+            "bot_index": bot_index or 0,
+            "size": int(getattr(media, "file_size", 0) or 0),
+            "duration": int(getattr(media, "duration", 0) or 0),
+            "mime": getattr(media, "mime_type", "") or "video/mp4",
+        })
+        if primary is None:
+            primary = (client, msg, media, l)
+
+    client, msg, media, ref_link = primary
     bot_index = None
     for i, c in tg.clients.items():
         if c is client:
             bot_index = i
             break
     ep_id = await tg.upsert_episode(msg, media, playlist_id, season, ep_num,
-                                     title, bot_index, ref=link)
+                                     title, bot_index, ref=ref_link)
+    async with SessionLocal() as s:
+        obj = await s.get(Episode, ep_id)
+        if obj:
+            obj.sources_json = json.dumps(sources)
+            await s.commit()
     return {"ok": True, "episode_id": ep_id, "playlist_id": playlist_id}
 
 
@@ -387,16 +438,33 @@ def _parse_range(range_header: str, total: int):
 
 
 @app.get("/api/stream/{ep_id}")
-async def api_stream(ep_id: int, request: Request, download: int = 0):
+async def api_stream(ep_id: int, request: Request, download: int = 0, q: str = ""):
     async with SessionLocal() as s:
         e = await s.get(Episode, ep_id)
     if not e:
         raise HTTPException(status_code=404, detail="Video nahi mili")
-    client = tg.get_client(e.bot_index)
+    # multi-quality source chuno (?q=720p waghera)
+    chat_id, message_id, bot_index = e.chat_id, e.message_id, e.bot_index
+    try:
+        srcs = json.loads(e.sources_json or "[]")
+    except Exception:
+        srcs = []
+    if srcs:
+        chosen = None
+        if q:
+            for s_ in srcs:
+                if str(s_.get("label", "")).lower() == str(q).lower():
+                    chosen = s_
+                    break
+        s_ = chosen or srcs[0]
+        chat_id = int(s_["chat_id"]); message_id = int(s_["message_id"])
+        bot_index = int(s_.get("bot_index", 0))
+
+    client = tg.get_client(bot_index)
     if client is None:
         raise HTTPException(status_code=503, detail="Storage bot offline hai")
 
-    msg = await client.get_messages(e.chat_id, e.message_id)
+    msg = await client.get_messages(chat_id, message_id)
     media = msg.video if msg.video else (msg.document if msg.document else None)
     if media is None:
         raise HTTPException(status_code=404, detail="Video Telegram pe nahi mili "

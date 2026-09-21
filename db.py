@@ -52,6 +52,7 @@ class Episode(Base):
     mime: Mapped[str] = mapped_column(default="video/mp4")
     views: Mapped[int] = mapped_column(default=0)
     ref: Mapped[str] = mapped_column(default="")  # kis link se aaya
+    sources_json: Mapped[str] = mapped_column(default="", nullable=True)  # multi-quality sources
     created_at: Mapped[float] = mapped_column(default=0)
 
 
