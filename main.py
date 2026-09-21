@@ -47,6 +47,17 @@ async def lifespan(app):
 app = FastAPI(title=APP_NAME, lifespan=lifespan)
 
 
+@app.exception_handler(Exception)
+async def _unhandled_error(request, exc):
+    """500 ke andar ka poora sach — screen pe hi dikh jayega."""
+    import traceback
+    tb = traceback.format_exc()
+    print("=== UNHANDLED ERROR ===\n" + tb)
+    last = tb.strip().splitlines()[-1][:220] if tb else str(exc)[:220]
+    return JSONResponse(status_code=500,
+                        content={"detail": f"Server error: {str(exc)[:120]} | {last}"})
+
+
 # ---------------- auth utils ----------------
 
 def make_token(uid: int) -> str:
