@@ -343,30 +343,6 @@ async def api_add(request: Request):
     ep_num = max(1, int(body.get("ep_num") or 1))
     title = (body.get("title") or "").strip()
 
-    # playlist: existing id ya new
-    if body.get("new_playlist"):
-        np_ = body["new_playlist"]
-        t = (np_.get("title") or "").strip()
-        if not t:
-            raise HTTPException(status_code=400, detail="New playlist ka title likho")
-        thumb = np_.get("thumb") or ""
-        if thumb:
-            thumb = _clean_thumb(thumb)
-        async with SessionLocal() as s:
-            pl = Playlist(
-                title=t[:200], category=(np_.get("category") or "Other")[:60],
-                desc=(np_.get("desc") or "")[:1000],
-                emoji=(np_.get("emoji") or "🎬")[:8], thumb=thumb, created_at=time.time(),
-            )
-            s.add(pl)
-            await s.commit()
-            playlist_id = pl.id
-    else:
-        playlist_id = int(body.get("playlist_id") or 0)
-        async with SessionLocal() as s:
-            if not await s.get(Playlist, playlist_id):
-                raise HTTPException(status_code=400, detail="Playlist select karo")
-
     # ---- multi-quality links (480p/720p/1080p) + legacy single link ----
     def _qnum(lbl):
         m = re.search(r"(\d{3,4})\s*p", str(lbl), re.I)
@@ -405,6 +381,30 @@ async def api_add(request: Request):
         })
         if primary is None:
             primary = (client, msg, media, l)
+
+    # playlist: existing id ya new
+    if body.get("new_playlist"):
+        np_ = body["new_playlist"]
+        t = (np_.get("title") or "").strip()
+        if not t:
+            raise HTTPException(status_code=400, detail="New playlist ka title likho")
+        thumb = np_.get("thumb") or ""
+        if thumb:
+            thumb = _clean_thumb(thumb)
+        async with SessionLocal() as s:
+            pl = Playlist(
+                title=t[:200], category=(np_.get("category") or "Other")[:60],
+                desc=(np_.get("desc") or "")[:1000],
+                emoji=(np_.get("emoji") or "🎬")[:8], thumb=thumb, created_at=time.time(),
+            )
+            s.add(pl)
+            await s.commit()
+            playlist_id = pl.id
+    else:
+        playlist_id = int(body.get("playlist_id") or 0)
+        async with SessionLocal() as s:
+            if not await s.get(Playlist, playlist_id):
+                raise HTTPException(status_code=400, detail="Playlist select karo")
 
     client, msg, media, ref_link = primary
     bot_index = None
