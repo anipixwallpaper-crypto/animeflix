@@ -20,10 +20,13 @@ from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy import UniqueConstraint, BigInteger, text
 
+# Neon pooler (PgBouncer) prepared statements support nahi karta —
+# isliye asyncpg ka statement cache OFF (InvalidCachedStatementError ka fix)
+_pg_args = {"ssl": "require", "statement_cache_size": 0} if is_pg else {}
 engine = create_async_engine(
     DATABASE_URL,
     echo=False,
-    connect_args={"ssl": "require"} if is_pg else {},
+    connect_args=_pg_args,
 )
 SessionLocal = async_sessionmaker(engine, expire_on_commit=False)
 
