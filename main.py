@@ -87,12 +87,13 @@ async def require_admin(request: Request) -> User:
     return u
 
 
-def pl_stats_row(pl, ecount, seasons, views, rating, rcount):
+def pl_stats_row(pl, ecount, seasons, views, rating, rcount, last_added=0):
     return {
         "id": pl.id, "title": pl.title, "category": pl.category,
         "desc": pl.desc, "emoji": pl.emoji, "has_thumb": bool(pl.thumb),
         "episodes": ecount, "seasons": seasons, "views": views,
         "rating": round(rating, 1) if rcount else 0, "rating_count": rcount,
+        "last_added": last_added or pl.created_at,
     }
 
 
@@ -182,9 +183,13 @@ async def api_playlists():
             select(Rating.playlist_id, func.avg(Rating.stars), func.count(Rating.id)).group_by(Rating.playlist_id)
         )).all()
         rmap = {r[0]: (r[1] or 0, r[2]) for r in rates}
+        lastadd = dict((await s.execute(
+            select(Episode.playlist_id, func.max(Episode.created_at)).group_by(Episode.playlist_id)
+        )).all())
     return [
         pl_stats_row(p, ecount.get(p.id, 0), seasons.get(p.id, 0),
-                     views.get(p.id, 0), rmap.get(p.id, (0, 0))[0], rmap.get(p.id, (0, 0))[1])
+                     views.get(p.id, 0), rmap.get(p.id, (0, 0))[0], rmap.get(p.id, (0, 0))[1],
+                     lastadd.get(p.id, 0))
         for p in pls
     ]
 
@@ -206,6 +211,28 @@ def ep_row(e):
         "has_link": bool(e.ref),
         "qualities": _ep_qualities(e),
     }
+
+
+@app.get("/api/admin/stats")
+async def api_admin_stats(request: Request):
+    await require_admin(request)
+    async with SessionLocal() as s:
+        users = (await s.execute(select(func.count(User.id)))).scalar() or 0
+        pls = (await s.execute(select(func.count(Playlist.id)))).scalar() or 0
+        eps = (await s.execute(select(func.count(Episode.id)))).scalar() or 0
+        views = (await s.execute(select(func.coalesce(func.sum(Episode.views), 0)))).scalar() or 0
+        cmts = (await s.execute(select(func.count(Comment.id)))).scalar() or 0
+        rts = (await s.execute(select(func.count(Rating.id)))).scalar() or 0
+        sumv = func.coalesce(func.sum(Episode.views), 0)
+        top = (await s.execute(
+            select(Playlist.title, sumv).outerjoin(Episode, Episode.playlist_id == Playlist.id)
+            .group_by(Playlist.id).order_by(sumv.desc()).limit(5)
+        )).all()
+        recent = (await s.execute(select(Comment).order_by(Comment.id.desc()).limit(5))).scalars().all()
+    return {"users": users, "playlists": pls, "episodes": eps, "views": int(views),
+            "comments": cmts, "ratings": rts,
+            "top": [{"title": t, "views": int(v)} for t, v in top],
+            "recent_comments": [{"name": c.user_name, "text": (c.text or "")[:100], "at": c.created_at} for c in recent]}
 
 
 @app.get("/api/playlists/{pid}")

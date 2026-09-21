@@ -197,6 +197,13 @@
         trending.forEach(pl=>row.appendChild(makeCard(pl)));
         wrap.appendChild(t); wrap.appendChild(row);
       }
+      const recent=[...LIB].filter(p=>p.last_added).sort((a,b)=>(b.last_added||0)-(a.last_added||0)).slice(0,10);
+      if(recent.length){
+        const t=document.createElement("div"); t.className="row-title"; t.textContent="🆕 Recently Added";
+        const row=document.createElement("div"); row.className="hscroll";
+        recent.forEach(pl=>row.appendChild(makeCard(pl)));
+        wrap.appendChild(t); wrap.appendChild(row);
+      }
       const catsOnly=[...new Set(LIB.map(p=>p.category||"Other"))].slice(0,4);
       catsOnly.forEach(c=>{
         const rowPls=LIB.filter(p=>p.category===c);
@@ -235,14 +242,25 @@
     function showResults(){
       results.innerHTML="";
       const q=query.trim().toLowerCase();
-      const list=q?LIB.filter(p=>(p.title||"").toLowerCase().includes(q)):[];
+      const list=LIB.filter(p=>(!q||(p.title||"").toLowerCase().includes(q))&&(scat==="All"||p.category===scat));
       const grid=document.createElement("div"); grid.className="grid";
       if(!list.length){
         const e=document.createElement("div"); e.className="empty"; e.style.gridColumn="1/-1";
-        e.innerHTML='<div class="empty-state-icon">🔍</div>'+(q?"Kuch nahi mila — dusra naam try karo":"Naam likho — playlist search hoga");
+        e.innerHTML='<div class="empty-state-icon">🔍</div>'+((q||scat!=="All")?"Kuch nahi mila — dusra naam try karo":"Naam likho ya category chuno — playlist search hoga");
         grid.appendChild(e);
       } else list.forEach(pl=>grid.appendChild(makeCard(pl)));
       results.appendChild(grid);
+    }
+    let scat="All";
+    const cats=["All",...new Set(LIB.map(p=>p.category||"Other"))];
+    if(cats.length>1){
+      const chips=document.createElement("div"); chips.className="chips";
+      cats.forEach(c=>{ const ch=document.createElement("div"); ch.className="chip"+(c===scat?" active":"");
+        ch.textContent=c; ch.onclick=()=>{ scat=c;
+          chips.querySelectorAll(".chip").forEach(x=>x.classList.remove("active"));
+          ch.classList.add("active"); showResults(); };
+        chips.appendChild(ch); });
+      wrap.append(chips);
     }
     inp.addEventListener("input",e=>{ query=e.target.value; showResults(); });
     showResults();
@@ -310,6 +328,51 @@
       card.appendChild(si);
     }
     wrap.appendChild(card);
+
+    // 🕘 Watch History
+    const hist=Object.entries(S.history).filter(([k,h])=>h.pid).sort((a,b)=>b[1].at-a[1].at).slice(0,20);
+    if(hist.length){
+      const t2=document.createElement("div"); t2.className="row-title"; t2.textContent="🕘 Watch History";
+      const row=document.createElement("div"); row.className="hscroll";
+      hist.forEach(([k,h])=>{ const pl=LIB.find(p=>p.id===h.pid); if(!pl) return;
+        const card2=makeCard(pl);
+        const prog=document.createElement("div"); prog.className="progress-line";
+        prog.style.width=(h.dur?Math.min(100,h.pos/h.dur*100):0)+"%";
+        card2.querySelector(".poster").appendChild(prog);
+        card2.onclick=()=>goWatch(h.pid,h.season,h.ep);
+        row.appendChild(card2); });
+      wrap.append(t2,row);
+    }
+
+    // 📊 Admin Stats (sirf admin ko)
+    if(ME&&ME.is_admin){
+      const st=document.createElement("div"); st.className="row-title"; st.textContent="📊 Admin Stats";
+      const box=document.createElement("div"); box.style.cssText="background:#151926;border-radius:12px;padding:14px;margin-top:6px";
+      box.textContent="Load ho raha hai...";
+      wrap.append(st,box);
+      api("/api/admin/stats").then(s2=>{
+        box.innerHTML="";
+        const g=document.createElement("div");
+        g.style.cssText="display:grid;grid-template-columns:repeat(3,1fr);gap:10px";
+        const item=(lab,val)=>{ const d=document.createElement("div");
+          d.style.cssText="background:#0d1020;border-radius:10px;padding:12px;text-align:center";
+          d.innerHTML='<div style="font-size:1.25rem;font-weight:700">'+esc(String(val))+'</div><div style="font-size:.7rem;color:var(--muted)">'+esc(lab)+'</div>';
+          return d; };
+        g.append(item("Users",s2.users),item("Playlists",s2.playlists),item("Episodes",s2.episodes),
+                 item("Views",s2.views),item("Comments",s2.comments),item("Ratings",s2.ratings));
+        box.appendChild(g);
+        if(s2.top&&s2.top.length){
+          const tl=document.createElement("div"); tl.style.cssText="margin-top:10px;font-size:.82rem;color:var(--muted)";
+          tl.innerHTML="<b style='color:#fff'>🔥 Top:</b> "+s2.top.map(t3=>esc(t3.title)+" ("+fmtViews(t3.views)+")").join(" · ");
+          box.appendChild(tl);
+        }
+        if(s2.recent_comments&&s2.recent_comments.length){
+          const cl=document.createElement("div"); cl.style.cssText="margin-top:10px;font-size:.82rem;color:var(--muted)";
+          cl.innerHTML="<b style='color:#fff'>💬 Recent:</b> "+s2.recent_comments.map(c=>esc(c.name)+": "+esc(c.text)).join(" · ");
+          box.appendChild(cl);
+        }
+      }).catch(()=>{ box.textContent="Stats load nahi hui"; });
+    }
     $("main").appendChild(wrap);
   }
 
