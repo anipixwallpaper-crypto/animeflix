@@ -7,6 +7,29 @@ import re
 import time
 from typing import Optional
 
+# --- SPEED PATCH: TgCrypto (10x streaming speed) ---
+# Pyrogram import se PEHLE install karna zaroori hai warna load nahi hota.
+# --only-binary: bina compiler ke fast fail (galat Python version pe). Safe.
+try:
+    import tgcrypto  # noqa: F401
+    print("[tg] TgCrypto ON")
+except ImportError:
+    try:
+        import subprocess, sys
+        for _a in ([sys.executable, "-m", "pip", "install", "--user", "--only-binary", ":all:", "-q", "tgcrypto"],
+                   [sys.executable, "-m", "pip", "install", "--only-binary", ":all:", "-q", "tgcrypto"]):
+            try:
+                subprocess.run(_a, timeout=90, capture_output=True)
+                import tgcrypto  # noqa: F401
+                print("[tg] TgCrypto install ho gaya — streaming 10x fast!")
+                break
+            except Exception:
+                continue
+        else:
+            print("[tg] TgCrypto wheel nahi mili — normal speed (PYTHON_VERSION=3.11 set karo)")
+    except Exception:
+        pass
+
 from pyrogram import Client
 from pyrogram.handlers import MessageHandler
 from pyrogram.enums import ChatType
