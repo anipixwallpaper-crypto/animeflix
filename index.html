@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="theme-color" content="#0a0e1a">
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/icon-192.png">
+<title>AnimeFlix</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="logo" id="logoHome">▶ AnimeFlix</div>
+  <button class="btn accent small hidden" id="adminBtn">＋ Add</button>
+  <button class="btn ghost small" id="signinBtn">Sign in</button>
+  <div class="avatar hidden" id="userAvatar" title="Profile (click = sign out)"></div>
+</header>
+
+<main id="main"></main>
+
+<nav class="bottom-nav">
+  <div class="nav-item active" id="navHome"><span class="ni">🏠</span><span class="nl">Home</span></div>
+  <div class="nav-item" id="navSearch"><span class="ni">🔍</span><span class="nl">Search</span></div>
+  <div class="nav-item" id="navSaved"><span class="ni">🔖</span><span class="nl">Saved</span></div>
+  <div class="nav-item" id="navProfile"><span class="ni">👤</span><span class="nl">Profile</span></div>
+</nav>
+
+<!-- sign in -->
+<div class="modal hidden" id="signinModal">
+  <div class="dialog">
+    <h3>🔐 Sign in</h3>
+    <div id="googleBtnWrap" class="hidden"></div>
+    <div id="demoLogin" class="hidden" style="display:flex;flex-direction:column;gap:14px">
+      <div class="hintbox">Naam likh ke login karo — comments/ratings ke liye.</div>
+      <input id="nameInput" placeholder="Tumhara naam">
+      <button class="g-btn" id="demoBtn">Continue</button>
+    </div>
+    <div class="err" id="signinErr"></div>
+    <button class="btn ghost small" id="signinCancel">Cancel</button>
+  </div>
+</div>
+
+<!-- add video (admin) -->
+<div class="modal hidden" id="addModal">
+  <div class="dialog">
+    <h3>➕ Add Episode</h3>
+    <div class="hintbox">
+      Channel message ka link paste karo:<br>
+      <b>https://t.me/c/2700515710/49</b><br>
+      Ya seedha channel pe video bhejo — "My Uploads" me khud aa jayegi.
+    </div>
+    <label>Telegram link</label>
+    <input id="addLink" placeholder="https://t.me/c/2700515710/49">
+    <div class="err" id="linkErr"></div>
+    <label>Playlist</label>
+    <select id="addPlaylist"></select>
+    <div id="newPlFields" class="hidden" style="display:flex;flex-direction:column;gap:14px">
+      <div><label style="display:block;margin-bottom:6px">New playlist title</label>
+        <input id="newPlTitle" placeholder="Jaise: Dragon Scroll Saga"></div>
+      <div><label style="display:block;margin-bottom:6px">Category</label>
+        <input id="newPlCat" placeholder="Action / Romance..."></div>
+      <div><label style="display:block;margin-bottom:6px">Poster emoji (agar image nahi doge)</label>
+        <select id="newPlEmoji"></select></div>
+      <div><label style="display:block;margin-bottom:6px">Description</label>
+        <input id="newPlDesc" placeholder="Playlist ke baare me..."></div>
+      <div><label style="display:block;margin-bottom:6px">Poster image (optional)</label>
+        <label class="file-label">📷 Choose Image<input id="newPlThumb" type="file" accept="image/*" hidden></label>
+        <div class="thumb-preview" id="thumbPrev" style="margin-top:8px">koi image nahi</div></div>
+    </div>
+    <label>Season</label>
+    <input id="addSeason" type="number" min="1" value="1">
+    <label>Episode number</label>
+    <input id="addEpNum" type="number" min="1" value="1">
+    <label>Episode title (optional)</label>
+    <input id="addEpTitle" placeholder="Episode 1 — The Beginning">
+    <button class="btn accent" id="addBtn">Add to Playlist</button>
+    <button class="btn ghost small" id="addCancel">Cancel</button>
+    <div class="err" id="addErr"></div>
+  </div>
+</div>
+
+<input type="file" id="bannerThumbInput" accept="image/*" hidden>
+<div id="toast"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>

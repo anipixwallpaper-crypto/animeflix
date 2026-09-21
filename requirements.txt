@@ -1,0 +1,8 @@
+fastapi
+uvicorn[standard]
+python-multipart
+sqlalchemy[asyncio]>=2
+aiosqlite
+asyncpg
+pyrogram==2.0.106
+google-auth

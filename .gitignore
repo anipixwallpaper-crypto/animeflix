@@ -1,0 +1,4 @@
+data.db
+sessions/
+__pycache__/
+*.pyc

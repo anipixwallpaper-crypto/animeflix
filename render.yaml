@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: animeflix
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt && (pip install tgcrypto || echo "tgcrypto skipped")
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: API_ID
+        sync: false
+      - key: API_HASH
+        sync: false
+      - key: BOT_TOKENS
+        sync: false
+      - key: STORAGE_CHANNEL_ID
+        sync: false
+      - key: ADMIN_TG_IDS
+        sync: false
+      - key: DATABASE_URL
+        sync: false
+      - key: APP_NAME
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: ADMIN_EMAILS
+        sync: false
+      - key: ADMIN_DEMO_NAME
+        sync: false
+      - key: SECRET
+        generateValue: true
