@@ -216,12 +216,24 @@ def _ep_qualities(e):
         return []
 
 
+def _ep_playable(e):
+    """Ye episode browser me chalegi ya nahi (MKV/renamed detection)."""
+    fname = (e.title or "").lower()
+    if fname.endswith((".mkv", ".avi", ".flv", ".wmv", ".ts")):
+        return False
+    fmime = (e.mime or "").lower()
+    if "matroska" in fmime or "x-flv" in fmime:
+        return False
+    return True
+
+
 def ep_row(e):
     return {
         "id": e.id, "playlist_id": e.playlist_id, "season": e.season, "ep_num": e.ep_num,
         "title": e.title, "size": e.size, "duration": e.duration, "views": e.views,
         "has_link": bool(e.ref),
         "qualities": _ep_qualities(e),
+        "playable": _ep_playable(e),
     }
 
 
@@ -460,7 +472,13 @@ async def api_add(request: Request):
             await s.commit()
     warning = ""
     fname = (getattr(media, "file_name", "") or "").lower()
-    if fname.endswith((".mkv", ".avi", ".flv", ".wmv", ".ts")):
+    fmime = (getattr(media, "mime_type", "") or "").lower()
+    bad_ext = fname.endswith((".mkv", ".avi", ".flv", ".wmv", ".ts"))
+    bad_mime = ("matroska" in fmime) or ("x-flv" in fmime)
+    if bad_mime and fname.endswith(".mp4"):
+        warning = ("Ye file ka sirf NAAM .mp4 hai — andar se MKV hai (rename kiya tha na?)! "
+                   "Naam badalne se format nahi badalta. cloudconvert.com se asli MKV→MP4 conversion karo.")
+    elif bad_ext or bad_mime:
         warning = ("Ye video ka format browser me play NAHI hoga! "
                     "MP4 (H.264) version upload karke uska link add karo.")
     return {"ok": True, "episode_id": ep_id, "playlist_id": playlist_id, "warning": warning}

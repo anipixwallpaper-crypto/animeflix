@@ -431,7 +431,7 @@
       const num=document.createElement("div"); num.className="ep-num"; num.textContent=e.ep_num;
       const ei=document.createElement("div"); ei.className="ep-info";
       const et=document.createElement("div"); et.className="ep-title";
-      et.innerHTML=esc(e.ep_num+". "+e.title)+(e.has_link?'<span class="tg-tag">🔗 TG</span>':"");
+      et.innerHTML=esc(e.ep_num+". "+e.title)+(e.playable===false?'<span class="tg-tag" style="background:rgba(255,70,70,.25);color:#ff9a9a">⚠️ format</span>':"")+(e.has_link?'<span class="tg-tag">🔗 TG</span>':"");
       const em=document.createElement("div"); em.className="ep-meta";
       em.textContent=fmtMB(e.duration)+" · "+fmtViews(e.views);
       ei.append(et,em);
@@ -546,7 +546,7 @@
     v.addEventListener("play",()=>ov.classList.add("hidden"));
     v.addEventListener("error",()=>{
       if(window.AF_NEXT_URL){ const nu=window.AF_NEXT_URL(v.currentSrc); if(nu){ v.src=nu; tryPlay(); return; } }
-      const badfmt=/\.(mkv|avi|flv|wmv|mov|ts)\s*$/i.test(e.title||"");
+      const badfmt=/\.(mkv|avi|flv|wmv|mov|ts)\s*$/i.test(e.title||"")||e.playable===false;
       toast(badfmt
         ? "Ye format (MKV/AVI) browser me play NAHI hota — MP4 (H.264) version upload karo"
         : "Video load nahi hui — internet check karo");
@@ -555,6 +555,12 @@
     let lastSave=0;
     v.addEventListener("timeupdate",()=>{ const n=Date.now(); if(n-lastSave>4000){ lastSave=n; saveProgress(); } });
     col.appendChild(pw);
+
+    if(e.playable===false){
+      const fw=document.createElement("div"); fw.className="cfgwarn"; fw.style.marginTop="10px";
+      fw.innerHTML="⚠️ <b>Ye video browser me NAHI chalegi</b> — file MKV hai ya naam se badli hui hai. Asli MP4 (H.264) version ka link add karo (cloudconvert.com se convert karke).";
+      col.appendChild(fw);
+    }
 
     if(quals.length>1){
       const qb=document.createElement("div"); qb.className="qbar";
