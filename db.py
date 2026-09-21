@@ -10,6 +10,12 @@ elif DATABASE_URL.startswith("postgresql://"):
 
 is_pg = DATABASE_URL.startswith("postgresql")
 
+# Neon/Supabase jaise URL me ?sslmode=require hota hai — asyncpg ka connect()
+# "sslmode" kwarg accept nahi karta (SQLAlchemy error deta hai). Query string hatao;
+# SSL connect_args se lagta hai (neeche "ssl": "require").
+if is_pg and "?" in DATABASE_URL:
+    DATABASE_URL = DATABASE_URL.split("?")[0]
+
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy import UniqueConstraint
