@@ -5,6 +5,7 @@ Pyrogram (MTProto) use karta hai — Bot API ki 20MB limit nahi lagti.
 import os
 import re
 import time
+import asyncio
 from typing import Optional
 
 # --- SPEED PATCH: TgCrypto (10x streaming speed) ---
@@ -278,7 +279,22 @@ async def start():
             bot_token=token, workdir=SESSION_DIR,
         )
         c.add_handler(MessageHandler(_make_handler(idx)))
-        await c.start()
+        try:
+            await c.start()
+        except Exception as e:
+            # FloodWait chhota ho to wait karke ek baar retry, warna bot skip
+            w = int(getattr(e, "value", 0) or 0)
+            if w and 0 < w <= 90:
+                print(f"[tg] bot{idx}: FloodWait {w}s — wait karke retry")
+                await asyncio.sleep(w + 2)
+                try:
+                    await c.start()
+                except Exception as e2:
+                    print(f"[tg] bot{idx} start fail — skip: {str(e2)[:80]}")
+                    continue
+            else:
+                print(f"[tg] bot{idx} start fail — skip: {str(e)[:80]}")
+                continue
         await _restore_peer_memory(c, idx)
         # channel memory khud seekhne ki koshish (khud-doctor)
         if STORAGE_CHANNEL_ID:
@@ -289,6 +305,8 @@ async def start():
             except Exception:
                 pass
         clients[idx] = c
+    if not clients:
+        print("[tg] SAB bots offline — app phir bhi chalegi (video add/stream baad me try karo)")
     print(f"[tg] {len(clients)} bot(s) connected.")
 
 
