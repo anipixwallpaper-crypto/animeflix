@@ -556,6 +556,15 @@
     v.addEventListener("timeupdate",()=>{ const n=Date.now(); if(n-lastSave>4000){ lastSave=n; saveProgress(); } });
     col.appendChild(pw);
 
+    // codec jhaank: MP4 hai par HEVC ho sakta hai — khud batayenge
+    api("/api/codec/"+e.id).then(cx=>{
+      if(cx && cx.browser_ok===false){
+        const fw=document.createElement("div"); fw.className="cfgwarn"; fw.style.marginTop="10px";
+        fw.innerHTML="⚠️ <b>Ye video ka codec "+esc(cx.codec)+" hai — browser me NAHI chalega!</b> H.264 (x264) wali file upload karo. (Ye MP4 ka naam hai par andar ka video format browser ke bahar hai.)";
+        col.appendChild(fw);
+      }
+    }).catch(()=>{});
+
     if(e.playable===false){
       const fw=document.createElement("div"); fw.className="cfgwarn"; fw.style.marginTop="10px";
       fw.innerHTML="⚠️ <b>Ye video browser me NAHI chalegi</b> — file MKV hai ya naam se badli hui hai. Asli MP4 (H.264) version ka link add karo (cloudconvert.com se convert karke).";

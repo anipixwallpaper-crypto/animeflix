@@ -579,6 +579,48 @@ async def api_stream(ep_id: int, request: Request, download: int = 0, q: str = "
     )
 
 
+@app.get("/api/codec/{ep_id}")
+async def api_codec(ep_id: int):
+    """Video ke andar jhaank kar batata hai ki codec browser me chalega ya nahi."""
+    async with SessionLocal() as s:
+        e = await s.get(Episode, ep_id)
+    if not e:
+        raise HTTPException(status_code=404, detail="Video nahi mili")
+    chat_id, message_id, bot_index = e.chat_id, e.message_id, e.bot_index
+    try:
+        srcs = json.loads(e.sources_json or "[]")
+        if srcs:
+            chat_id, message_id, bot_index = int(srcs[0]["chat_id"]), int(srcs[0]["message_id"]), int(srcs[0].get("bot_index", 0))
+    except Exception:
+        pass
+    client = tg.get_client(bot_index)
+    if client is None:
+        raise HTTPException(status_code=503, detail="Bot offline")
+    try:
+        msg = await client.get_messages(chat_id, message_id)
+        buf = b""
+        async for chunk in client.stream_media(msg, limit=262144, offset=0):
+            buf += chunk
+            if len(buf) >= 262144:
+                break
+    except Exception as ex:
+        raise HTTPException(status_code=502, detail=f"Video read nahi ho payi: {str(ex)[:100]}")
+    b = buf  # scan
+    if any(m in b for m in (b"hvc1", b"hev1", b"hvcC", b"HEVC".lower())):
+        codec, ok = "H.265/HEVC", False
+    elif b"av01" in b:
+        codec, ok = "AV1", True
+    elif any(m in b for m in (b"avc1", b"avcC")):
+        codec, ok = "H.264", True
+    elif b"matroska" in b or b"webm" in b:
+        codec, ok = "MKV/WebM", False
+    else:
+        codec, ok = "unknown", None
+    return {"codec": codec, "browser_ok": ok,
+            "detail": {"h264": b"avc1" in b or b"avcC" in b, "hevc": b"hvc1" in b or b"hvcC" in b,
+                       "av1": b"av01" in b, "mp4": b"ftyp" in b}}
+
+
 @app.get("/api/epthumb/{ep_id}")
 async def api_ep_thumb(ep_id: int):
     try:
