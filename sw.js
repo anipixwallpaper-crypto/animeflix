@@ -1,5 +1,5 @@
-/* AnimeFlix service worker — app shell cache, /api kabhi cache nahi */
-const CACHE = "animeflix-v1";
+/* AnimeFlix service worker — naya version hamesha network se, offline me cache */
+const CACHE = "animeflix-v2";
 const SHELL = ["/", "/style.css", "/app.js", "/manifest.webmanifest", "/icon-192.png", "/icon-512.png"];
 
 self.addEventListener("install", (e) => {
@@ -18,14 +18,12 @@ self.addEventListener("fetch", (e) => {
   const url = new URL(e.request.url);
   if (e.request.method !== "GET" || url.pathname.startsWith("/api/")) return;
   e.respondWith(
-    caches.match(e.request).then(
-      (hit) => hit || fetch(e.request).then((res) => {
-        if (res.ok) {
-          const clone = res.clone();
-          caches.open(CACHE).then((c) => c.put(e.request, clone));
-        }
-        return res;
-      })
-    )
+    fetch(e.request).then((res) => {
+      if (res.ok) {
+        const clone = res.clone();
+        caches.open(CACHE).then((c) => c.put(e.request, clone));
+      }
+      return res;
+    }).catch(() => caches.match(e.request))
   );
 });
