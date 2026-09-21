@@ -590,12 +590,13 @@
     if(sel.options.length) return;
     EMOJIS.forEach(e=>{ const o=document.createElement("option"); o.value=e; o.textContent=e; sel.appendChild(o); });
   }
+  const syncNewPl=()=>{ $("newPlFields").classList.toggle("hidden",$("addPlaylist").value!=="new"); };
   $("adminBtn").onclick=()=>{ fillPlaylistSelect(); fillEmojiSelect();
-    $("newPlFields").classList.add("hidden"); $("thumbPrev").innerHTML="koi image nahi";
+    $("thumbPrev").innerHTML="koi image nahi";
     pendingThumb=null; $("addErr").textContent=""; $("linkErr").textContent="";
-    $("addModal").classList.remove("hidden"); };
+    $("addModal").classList.remove("hidden"); syncNewPl(); };
   $("addCancel").onclick=()=>$("addModal").classList.add("hidden");
-  $("addPlaylist").onchange=()=>{ $("newPlFields").classList.toggle("hidden",$("addPlaylist").value!=="new"); };
+  $("addPlaylist").onchange=syncNewPl;
   $("newPlThumb").addEventListener("change",function(){
     const f=this.files[0]; if(!f) return;
     readThumb(f,(d)=>{ pendingThumb=d; $("thumbPrev").innerHTML='<img src="'+d+'">'; });
