@@ -11,7 +11,8 @@ from pyrogram import Client
 from pyrogram.handlers import MessageHandler
 from pyrogram.enums import ChatType
 
-from db import SessionLocal, Playlist, Episode
+from sqlalchemy import select
+from db import SessionLocal, Playlist, Episode, TgPeer
 
 API_ID = int(os.environ.get("API_ID", "0") or 0)
 API_HASH = os.environ.get("API_HASH", "").strip()
@@ -91,6 +92,10 @@ async def _index_media_message(msg, bot_index: int, fallback_title: str = "") ->
 def _make_handler(bot_index: int):
     async def on_message(client: Client, message):
         try:
+            # 0) Channel-memory save (deploy-proof)
+            if message.chat:
+                await _save_peer_memory(client, bot_index, message.chat.id)
+
             # 1) Channel post (storage channel me nayi video) → auto-index
             if (message.chat and message.chat.type in (ChatType.CHANNEL, ChatType.SUPERGROUP)
                     and message.chat.id == STORAGE_CHANNEL_ID):
@@ -134,6 +139,43 @@ def _make_handler(bot_index: int):
     return on_message
 
 
+async def _save_peer_memory(client, bot_index: int, chat_id: int):
+    """Bot ki channel-memory (access hash) DB me save karo — deploy ke baad restore ke liye."""
+    try:
+        r = await client.storage.get_peer_by_id(chat_id)
+        if not r:
+            return
+        access_hash = int(r[1]); ptype = (r[2] if len(r) > 2 else None) or "channel"
+        async with SessionLocal() as s:
+            obj = await s.get(TgPeer, (bot_index, chat_id))
+            if obj:
+                obj.access_hash = access_hash
+                obj.peer_type = ptype
+            else:
+                s.add(TgPeer(bot_index=bot_index, peer_id=chat_id,
+                             access_hash=access_hash, peer_type=ptype))
+            await s.commit()
+    except Exception as e:
+        print("[tg] peer save fail:", e)
+
+
+async def _restore_peer_memory(client, bot_index: int):
+    """Deploy/restart ke baad bot ko pehle se jaane wale channels yaad dilao."""
+    try:
+        async with SessionLocal() as s:
+            rows = (await s.execute(
+                select(TgPeer).where(TgPeer.bot_index == bot_index)
+            )).scalars().all()
+        if rows:
+            await client.storage.update_peers([
+                (r.peer_id, r.access_hash, r.peer_type or "channel", r.username or "", None)
+                for r in rows
+            ])
+            print(f"[tg] bot{bot_index}: {len(rows)} channel(s) ki memory restore hui")
+    except Exception as e:
+        print("[tg] peer restore fail:", e)
+
+
 async def start():
     if not configured():
         print("[tg] Telegram env vars missing — Telegram OFFLINE mode.")
@@ -146,6 +188,7 @@ async def start():
         )
         c.add_handler(MessageHandler(_make_handler(idx)))
         await c.start()
+        await _restore_peer_memory(c, idx)
         clients[idx] = c
     print(f"[tg] {len(clients)} bot(s) connected.")
 
@@ -208,6 +251,7 @@ async def fetch_episode_media(link: str):
         chat_id, msg_id = parsed[1], parsed[2]
         try:
             msg = await client.get_messages(chat_id, msg_id)
+            await _save_peer_memory(client, idx, chat_id)
         except Exception as e:
             return None, ("Wo channel hamare bots ke liye accessible nahi hai. "
                           f"Us channel me apne saare bots ko admin banao. (Detail: {str(e)[:120]})"), None

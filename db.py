@@ -56,6 +56,17 @@ class Episode(Base):
     created_at: Mapped[float] = mapped_column(default=0)
 
 
+class TgPeer(Base):
+    """Bot ki channel-memory (access hash) — deploy/restart ke baad restore hoti hai."""
+    __tablename__ = "tg_peers"
+    bot_index: Mapped[int] = mapped_column(primary_key=True)
+    peer_id: Mapped[int] = mapped_column(primary_key=True)
+    access_hash: Mapped[int] = mapped_column()
+    peer_type: Mapped[str] = mapped_column(default="channel")
+    username: Mapped[str] = mapped_column(default="")
+    updated_at: Mapped[float] = mapped_column(default=0)
+
+
 class User(Base):
     __tablename__ = "users"
     id: Mapped[int] = mapped_column(primary_key=True)
