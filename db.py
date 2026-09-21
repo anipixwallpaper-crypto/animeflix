@@ -18,7 +18,7 @@ if is_pg and "?" in DATABASE_URL:
 
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
-from sqlalchemy import UniqueConstraint
+from sqlalchemy import UniqueConstraint, BigInteger, text
 
 engine = create_async_engine(
     DATABASE_URL,
@@ -50,7 +50,7 @@ class Episode(Base):
     season: Mapped[int] = mapped_column(default=1)
     ep_num: Mapped[int] = mapped_column(default=1)
     title: Mapped[str] = mapped_column(default="")
-    chat_id: Mapped[int] = mapped_column()
+    chat_id: Mapped[int] = mapped_column(BigInteger)
     message_id: Mapped[int] = mapped_column()
     bot_index: Mapped[int] = mapped_column(default=0)
     size: Mapped[int] = mapped_column(default=0)
@@ -66,8 +66,8 @@ class TgPeer(Base):
     """Bot ki channel-memory (access hash) — deploy/restart ke baad restore hoti hai."""
     __tablename__ = "tg_peers"
     bot_index: Mapped[int] = mapped_column(primary_key=True)
-    peer_id: Mapped[int] = mapped_column(primary_key=True)
-    access_hash: Mapped[int] = mapped_column()
+    peer_id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
+    access_hash: Mapped[int] = mapped_column(BigInteger)
     peer_type: Mapped[str] = mapped_column(default="channel")
     username: Mapped[str] = mapped_column(default="")
     updated_at: Mapped[float] = mapped_column(default=0)
@@ -104,3 +104,14 @@ class Rating(Base):
 async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # migration: bade Telegram IDs ke liye BIGINT (Postgres/Neon)
+        if is_pg:
+            for stmt in [
+                "ALTER TABLE episodes ALTER COLUMN chat_id TYPE BIGINT",
+                "ALTER TABLE tg_peers ALTER COLUMN peer_id TYPE BIGINT",
+                "ALTER TABLE tg_peers ALTER COLUMN access_hash TYPE BIGINT",
+            ]:
+                try:
+                    await conn.execute(text(stmt))
+                except Exception:
+                    pass
