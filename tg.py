@@ -176,6 +176,74 @@ async def _restore_peer_memory(client, bot_index: int):
         print("[tg] peer restore fail:", e)
 
 
+async def _learn_channel_peer(client, chat_id: int) -> bool:
+    """Bot ke liye channel ka peer (memory) seekhne ki koshish — khud-doctor.
+    Tareeka 1: channels.getChannels (access_hash=0) — agar bot channel me hai to mil sakta hai
+    Tareeka 2: getDialogs scan — bots ke saare chats"""
+    import pyrogram.utils as putils
+    from pyrogram import raw as _raw
+
+    async def _known():
+        try:
+            r = await client.storage.get_peer_by_id(chat_id)
+            return bool(r)
+        except Exception:
+            return False
+
+    if await _known():
+        return True
+
+    peers = []
+    # Tareeka 1: GetChannels
+    try:
+        bare = int(str(chat_id).replace("-100", ""))
+        r = await client.invoke(_raw.functions.channels.GetChannels(
+            id=[_raw.types.InputChannel(channel_id=bare, access_hash=0)]))
+        for peer in (getattr(r, "chats", []) or []):
+            if isinstance(peer, _raw.types.Channel):
+                pid = putils.get_channel_id(peer.id)
+                peers.append((pid, peer.access_hash,
+                              "channel" if peer.broadcast else "supergroup",
+                              peer.username, None))
+    except Exception:
+        pass
+    # Tareeka 2: GetDialogs
+    if not peers:
+        try:
+            r = await client.invoke(_raw.functions.messages.GetDialogs(
+                offset_date=0, offset_id=0, offset_peer=_raw.types.InputPeerEmpty(),
+                limit=100, hash=0))
+            for peer in (getattr(r, "chats", []) or []):
+                if isinstance(peer, _raw.types.Channel):
+                    pid = putils.get_channel_id(peer.id)
+                    peers.append((pid, peer.access_hash,
+                                  "channel" if peer.broadcast else "supergroup",
+                                  peer.username, None))
+        except Exception:
+            pass
+    if peers:
+        try:
+            await client.storage.update_peers(peers)
+        except Exception:
+            return False
+        return await _known()
+    return False
+
+
+async def channel_ready() -> bool:
+    """Traffic light: kya bots storage channel ko jaante hain?"""
+    if not clients or not STORAGE_CHANNEL_ID:
+        return False
+    for c in clients.values():
+        try:
+            r = await c.storage.get_peer_by_id(STORAGE_CHANNEL_ID)
+            if r:
+                return True
+        except Exception:
+            continue
+    return False
+
+
 async def start():
     if not configured():
         print("[tg] Telegram env vars missing — Telegram OFFLINE mode.")
@@ -189,6 +257,14 @@ async def start():
         c.add_handler(MessageHandler(_make_handler(idx)))
         await c.start()
         await _restore_peer_memory(c, idx)
+        # channel memory khud seekhne ki koshish (khud-doctor)
+        if STORAGE_CHANNEL_ID:
+            try:
+                ok = await _learn_channel_peer(c, STORAGE_CHANNEL_ID)
+                if ok:
+                    print(f"[tg] bot{idx}: channel memory mil gayi (auto)")
+            except Exception:
+                pass
         clients[idx] = c
     print(f"[tg] {len(clients)} bot(s) connected.")
 
@@ -251,10 +327,16 @@ async def fetch_episode_media(link: str):
         chat_id, msg_id = parsed[1], parsed[2]
         try:
             msg = await client.get_messages(chat_id, msg_id)
-            await _save_peer_memory(client, idx, chat_id)
         except Exception as e:
-            return None, ("Wo channel hamare bots ke liye accessible nahi hai. "
-                          f"Us channel me apne saare bots ko admin banao. (Detail: {str(e)[:120]})"), None
+            # peer bhoola ho to seekh ke ek baar aur try karo (self-heal)
+            try:
+                await _learn_channel_peer(client, chat_id)
+                msg = await client.get_messages(chat_id, msg_id)
+            except Exception as e2:
+                return None, ("Wo channel hamare bots ke liye accessible nahi hai. "
+                              "Us channel me apne saare bots ko admin banao. (Detail: "
+                              + str(e2)[:120] + ")"), None
+        await _save_peer_memory(client, idx, chat_id)
         media = _video_media(msg)
         if media is None:
             return None, "Us message me koi video nahi mili", None
