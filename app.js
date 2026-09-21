@@ -477,7 +477,10 @@
     v.addEventListener("play",()=>ov.classList.add("hidden"));
     v.addEventListener("error",()=>{
       if(window.AF_NEXT_URL){ const nu=window.AF_NEXT_URL(v.currentSrc); if(nu){ v.src=nu; tryPlay(); return; } }
-      toast("Video load nahi hui — internet check karo");
+      const badfmt=/\.(mkv|avi|flv|wmv|mov|ts)\s*$/i.test(e.title||"");
+      toast(badfmt
+        ? "Ye format (MKV/AVI) browser me play NAHI hota — MP4 (H.264) version upload karo"
+        : "Video load nahi hui — internet check karo");
     });
     v.addEventListener("ended",()=>{ toast("Auto-next..."); setTimeout(nextEpisode,900); });
     let lastSave=0;
@@ -645,7 +648,7 @@
           emoji:$("newPlEmoji").value||"🎬", desc:$("newPlDesc").value.trim(), thumb:pendingThumb||"" };
       } else body.playlist_id=Number($("addPlaylist").value);
       const r=await api("/api/add",{json:body});
-      toast("✅ Episode add ho gaya!");
+      toast(r.warning ? "⚠️ "+r.warning : "✅ Episode add ho gaya!");
       $("addModal").classList.add("hidden");
       $("addLink480").value=""; $("addLink720").value=""; $("addLink1080").value=""; $("addEpTitle").value="";
       $("addSeason").value=1; $("addEpNum").value=1;

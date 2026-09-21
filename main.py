@@ -419,7 +419,12 @@ async def api_add(request: Request):
         if obj:
             obj.sources_json = json.dumps(sources)
             await s.commit()
-    return {"ok": True, "episode_id": ep_id, "playlist_id": playlist_id}
+    warning = ""
+    fname = (getattr(media, "file_name", "") or "").lower()
+    if fname.endswith((".mkv", ".avi", ".flv", ".wmv", ".ts")):
+        warning = ("Ye video ka format browser me play NAHI hoga! "
+                    "MP4 (H.264) version upload karke uska link add karo.")
+    return {"ok": True, "episode_id": ep_id, "playlist_id": playlist_id, "warning": warning}
 
 
 # ---------------- streaming (PROXY) ----------------
