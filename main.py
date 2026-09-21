@@ -2,6 +2,13 @@
 AnimeFlix — asli app backend.
 FastAPI + Pyrogram. Telegram storage + proxy streaming + Google sign-in.
 """
+# --- Python 3.12+/3.13 + Pyrogram compat: event loop pre-create ---
+import asyncio as _asyncio
+try:
+    _asyncio.get_event_loop()
+except RuntimeError:
+    _asyncio.set_event_loop(_asyncio.new_event_loop())
+# -------------------------------------------------------------------
 import base64
 import hashlib
 import hmac
