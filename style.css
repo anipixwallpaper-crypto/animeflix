@@ -206,3 +206,7 @@ main { max-width:1100px; margin:0 auto; padding:16px 16px 90px; }
 .qlab { font-size:12px; opacity:.6; }
 .qchip { border:1px solid rgba(255,255,255,.18); background:#181c26; color:#ddd; border-radius:999px; padding:6px 14px; font-size:13px; cursor:pointer; }
 .qchip.on { background:var(--accent); color:#fff; border-color:transparent; font-weight:600; }
+
+/* ---- lal batti (channel memory pending) ---- */
+.cfgwarn { background:rgba(255,70,70,.12); border:1px solid rgba(255,70,70,.4); color:#ffb3b3;
+  border-radius:12px; padding:12px 14px; font-size:.85rem; line-height:1.5; margin-bottom:14px; }

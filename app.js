@@ -139,6 +139,12 @@
   function renderHome(){
     PP=null; $("main").innerHTML="";
     const wrap=document.createElement("div");
+    // lal batti — jab tak bots channel ko nahi jaante
+    if(CONFIG.telegram_connected && CONFIG.channel_ready===false){
+      const b=document.createElement("div"); b.className="cfgwarn";
+      b.innerHTML="⚠️ <b>Bots channel se abhi jud rahe hain</b> — apne channel me koi bhi 1 message bhejo (bas 'hi' likh do), phir page refresh karo. Tab tak video add nahi hoga. <b>Agar ye 2 minute baad bhi dikhe to bot us channel me admin nahi hai!</b>";
+      wrap.appendChild(b);
+    }
 
     // hero: sabse popular playlist
     if(LIB.length){
@@ -682,6 +688,8 @@
   }
   const syncNewPl=()=>{ $("newPlFields").classList.toggle("hidden",$("addPlaylist").value!=="new"); };
   $("adminBtn").onclick=()=>{ fillPlaylistSelect(); fillEmojiSelect();
+    if(CONFIG.telegram_connected && CONFIG.channel_ready===false)
+      $("linkErr").textContent="⚠️ Pehle channel me 1 message bhejo (bots memory ke liye) — warna add fail hoga";
     $("thumbPrev").innerHTML="koi image nahi";
     pendingThumb=null; $("addErr").textContent=""; $("linkErr").textContent="";
     $("addModal").classList.remove("hidden"); syncNewPl(); };

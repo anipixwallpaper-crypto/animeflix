@@ -106,6 +106,7 @@ async def api_config():
         "google_client_id": GOOGLE_CLIENT_ID,
         "demo_mode": not bool(GOOGLE_CLIENT_ID),
         "telegram_connected": tg.configured(),
+        "channel_ready": (await tg.channel_ready()) if tg.clients else False,
     }
 
 
