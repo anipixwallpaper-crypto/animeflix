@@ -547,9 +547,16 @@
     v.addEventListener("error",()=>{
       if(window.AF_NEXT_URL){ const nu=window.AF_NEXT_URL(v.currentSrc); if(nu){ v.src=nu; tryPlay(); return; } }
       const badfmt=/\.(mkv|avi|flv|wmv|mov|ts)\s*$/i.test(e.title||"")||e.playable===false;
-      toast(badfmt
-        ? "Ye format (MKV/AVI) browser me play NAHI hota — MP4 (H.264) version upload karo"
-        : "Video load nahi hui — internet check karo");
+      if(badfmt){ toast("Ye format (MKV/AVI) browser me play NAHI hota — MP4 (H.264) version upload karo"); return; }
+      fetch("/api/stream/"+e.id+(curQ?"?q="+encodeURIComponent(curQ):""), {headers:{Range:"bytes=0-1024"}})
+        .then(async r=>{
+          if(r.status===206||r.status===200){
+            toast("Server video data de raha hai — par browser play nahi kar paya. Codec HEVC ho sakta hai — MP4(H.264) try karo.");
+            return;
+          }
+          const t=await r.text(); let d=""; try{ d=JSON.parse(t).detail||""; }catch(_){}
+          toast("Stream error ("+r.status+"): "+String(d||"server se data nahi aaya").slice(0,140));
+        }).catch(()=>toast("Video load nahi hui — server so raha hoga, 1 min baad try karo"));
     });
     v.addEventListener("ended",()=>{ toast("Auto-next..."); setTimeout(nextEpisode,900); });
     let lastSave=0;
