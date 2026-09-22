@@ -553,11 +553,31 @@ async def api_stream(ep_id: int, request: Request, download: int = 0, q: str = "
         if rng is None:
             return Response(status_code=416, headers={"Content-Range": f"bytes */{total}"})
         start, end = rng
-        limit = end - start + 1
+        limit = end - start + 1  # kitne BYTES chahiye
+
+        # Pyrogram: limit=CHUNKS (1MB), offset=CHUNKS to skip — bytes NAHI!
+        CHUNK = 1024 * 1024
+        start_chunk = start // CHUNK
+        skip_in_first = start % CHUNK
+        n_chunks = (limit + skip_in_first + CHUNK - 1) // CHUNK
 
         async def gen():
-            async for chunk in client.stream_media(msg, limit=limit, offset=start):
-                yield chunk
+            sent = 0
+            skip = skip_in_first
+            async for chunk in client.stream_media(msg, limit=n_chunks, offset=start_chunk):
+                if skip:
+                    if len(chunk) <= skip:
+                        skip -= len(chunk)
+                        continue
+                    chunk = chunk[skip:]
+                    skip = 0
+                if sent + len(chunk) > limit:
+                    chunk = chunk[:limit - sent]
+                if chunk:
+                    yield chunk
+                sent += len(chunk)
+                if sent >= limit:
+                    break
 
         return StreamingResponse(
             gen(), status_code=206, media_type=mime,
