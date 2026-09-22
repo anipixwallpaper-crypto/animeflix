@@ -11,8 +11,10 @@ from typing import Optional
 # --- SPEED PATCH: TgCrypto (10x streaming speed) ---
 # Pyrogram import se PEHLE install karna zaroori hai warna load nahi hota.
 # --only-binary: bina compiler ke fast fail (galat Python version pe). Safe.
+SPEED_ON = False
 try:
     import tgcrypto  # noqa: F401
+    SPEED_ON = True
     print("[tg] TgCrypto ON")
 except ImportError:
     try:
@@ -22,6 +24,7 @@ except ImportError:
             try:
                 subprocess.run(_a, timeout=90, capture_output=True)
                 import tgcrypto  # noqa: F401
+                SPEED_ON = True
                 print("[tg] TgCrypto install ho gaya — streaming 10x fast!")
                 break
             except Exception:

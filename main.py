@@ -118,6 +118,7 @@ async def api_config():
         "demo_mode": not bool(GOOGLE_CLIENT_ID),
         "telegram_connected": tg.configured(),
         "channel_ready": (await tg.channel_ready()) if tg.clients else False,
+        "speed_on": getattr(tg, "SPEED_ON", False),
     }
 
 
@@ -619,7 +620,8 @@ async def api_diag():
     """Poora self-check: bots + channel + har video ka stream data."""
     cfg = {"telegram_connected": bool(tg.clients),
            "bots": sorted(tg.clients.keys()),
-           "channel_ready": await tg.channel_ready() if tg.clients else False}
+           "channel_ready": await tg.channel_ready() if tg.clients else False,
+           "speed_on": getattr(tg, "SPEED_ON", False)}
     rows = []
     async with SessionLocal() as s:
         eps = (await s.execute(select(Episode).order_by(Episode.id.desc()).limit(3))).scalars().all()
