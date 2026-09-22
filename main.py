@@ -19,7 +19,7 @@ import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request, HTTPException
-from fastapi.responses import StreamingResponse, Response, JSONResponse, FileResponse
+from fastapi.responses import StreamingResponse, Response, JSONResponse, FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select, func, delete
 
@@ -577,6 +577,56 @@ async def api_stream(ep_id: int, request: Request, download: int = 0, q: str = "
         gen(), media_type=mime,
         headers={"Accept-Ranges": "bytes", **dl_headers},
     )
+
+
+DIAG_HTML = """<!doctype html><html><head><meta charset=utf-8>
+<meta name=viewport content="width=device-width,initial-scale=1">
+<title>AnimeFlix Jaanch</title>
+<style>body{background:#0d1020;color:#eef1fa;font-family:monospace;padding:16px;font-size:12px}
+pre{white-space:pre-wrap;word-break:break-all}h1{font-size:18px}</style></head>
+<body><h1>🔍 AnimeFlix Jaanch Report</h1><pre id=r>Loading...</pre>
+<script>fetch('/api/diag').then(r=>r.json()).then(d=>{document.getElementById('r').textContent=JSON.stringify(d,null,1)}).catch(e=>{document.getElementById('r').textContent='FAIL: '+e})</script>
+</body></html>"""
+
+
+@app.get("/diag")
+async def diag_page():
+    return HTMLResponse(DIAG_HTML)
+
+
+@app.get("/api/diag")
+async def api_diag():
+    """Poora self-check: bots + channel + har video ka stream data."""
+    cfg = {"telegram_connected": bool(tg.clients),
+           "bots": sorted(tg.clients.keys()),
+           "channel_ready": await tg.channel_ready() if tg.clients else False}
+    rows = []
+    async with SessionLocal() as s:
+        eps = (await s.execute(select(Episode).order_by(Episode.id.desc()).limit(3))).scalars().all()
+    for e in eps:
+        row = {"id": e.id, "title": e.title, "bot_index": e.bot_index, "playable": _ep_playable(e)}
+        client = tg.get_client(e.bot_index)
+        if client is None:
+            row["stream"] = "FAIL: bot" + str(e.bot_index) + " offline hai (episode isi bot pe saved)"
+        else:
+            try:
+                msg = await client.get_messages(e.chat_id, e.message_id)
+                head = b""
+                async for chunk in client.stream_media(msg, limit=65536, offset=0):
+                    head += chunk
+                    if len(head) >= 64:
+                        break
+                if not head:
+                    row["stream"] = "FAIL: 0 bytes aaye (download fail)"
+                else:
+                    hex16 = head[:16].hex()
+                    brand = head[8:16].decode("latin1", "replace") if head[4:8] == b"ftyp" else "n/a"
+                    row["stream"] = "OK " + str(len(head)) + " bytes | ftyp=" + brand + " | hex=" + hex16
+            except Exception as ex:
+                row["stream"] = "FAIL: " + type(ex).__name__ + ": " + str(ex)[:100]
+        rows.append(row)
+    ok = any(r["stream"].startswith("OK") for r in rows)
+    return {"config": cfg, "episodes": rows, "VERDICT": "STREAM OK — data aa raha hai" if ok else "STREAM FAIL — data nahi aa raha"}
 
 
 @app.get("/api/codec/{ep_id}")
