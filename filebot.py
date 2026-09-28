@@ -287,26 +287,20 @@ async def _is_member(client, r, uid):
     return None
 
 
-async def _approve_join(client, chat_id, user_id):
-    """join request ko turant approve karo (video-wale bot jaisa)"""
-    try:
-        from pyrogram.raw.functions.messages import HideChatJoinRequest
-        from pyrogram.raw.types import InputUser
-        peer = await client.resolve_peer(chat_id)
-        await client.invoke(HideChatJoinRequest(
-            peer=peer, user_id=InputUser(user_id=user_id, access_hash=0), approved=True))
-        return True
-    except Exception as e:
-        print(f"[filebot] approve fail: {str(e)[:70]}")
-        return False
-
-
 async def fsub_not_joined(cid, uid, client):
-    """list of fsub rows user ne join nahi kiye — SYSTEM wala hamesha sabse pehle"""
+    """list of fsub rows user ne join nahi kiye — SYSTEM wala hamesha sabse pehle.
+    JOIN REQUEST bhej di ho to WO BHI JOINED maana jayega (content mil jayega)."""
     not_joined = []
+    # ---- is user ne kisi channel ko request bheji hai? ----
+    requested = set()
+    try:
+        rq = await pool.fetch("SELECT chat_id FROM fb_jreq WHERE user_id=$1", uid)
+        requested = {str(r["chat_id"]) for r in rq}
+    except Exception:
+        pass
     # ---- SYSTEM force sub (owner ka — LOCKED, koi hata nahi sakta) ----
     sysr = await sys_fsub_row()
-    if sysr and main_client:
+    if sysr and main_client and str(sysr["chat_id"]) not in requested:
         uname = await get_setting("sys_fsub_username")
         ah = int(await get_setting("sys_fsub_access_hash", 0) or 0)
         pseudo = {"chat_id": str(sysr["chat_id"]), "username": uname, "access_hash": ah}
@@ -317,6 +311,8 @@ async def fsub_not_joined(cid, uid, client):
                                "username": uname, "access_hash": ah})
     rows = await pool.fetch("SELECT * FROM fb_fsub WHERE clone_id=$1", cid)
     for r in rows:
+        if str(r["chat_id"]) in requested:
+            continue  # request bhej di — content do!
         if await _is_member(client, r, uid) is False:
             not_joined.append(r)
     return not_joined
@@ -1348,15 +1344,14 @@ def make_clone_handlers(cid):
             except Exception:
                 pass
 
-    # ---- join request AUTO-APPROVE (force-sub channels ke liye) ----
+    # ---- join REQUEST record (approve NAHI — bas user ka ID save) ----
     async def on_join_request(_, jr):
         try:
-            rows = await pool.fetch("SELECT chat_id FROM fb_fsub WHERE clone_id=$1", cid)
-            allowed = {str(r["chat_id"]) for r in rows}
-            if str(jr.chat.id) not in allowed:
-                return
-            if await _approve_join(_, jr.chat.id, jr.from_user.id):
-                print(f"[filebot] join request APPROVED: user={jr.from_user.id} chat={jr.chat.id}")
+            await pool.execute(
+                "INSERT INTO fb_jreq (chat_id, user_id) VALUES ($1,$2) "
+                "ON CONFLICT (chat_id, user_id) DO NOTHING",
+                str(jr.chat.id), jr.from_user.id)
+            print(f"[filebot] join REQUEST saved: user={jr.from_user.id} chat={jr.chat.id}")
         except Exception as e:
             print(f"[filebot] jreq err: {str(e)[:80]}")
 
@@ -1428,6 +1423,12 @@ async def start():
     await pool.execute("ALTER TABLE fb_fsub ADD COLUMN IF NOT EXISTS access_hash BIGINT DEFAULT 0")
     await pool.execute("ALTER TABLE fb_fsub ADD COLUMN IF NOT EXISTS username TEXT")
     await pool.execute("""
+        CREATE TABLE IF NOT EXISTS fb_jreq (
+            chat_id TEXT NOT NULL,
+            user_id BIGINT NOT NULL,
+            UNIQUE (chat_id, user_id)
+        )""")
+    await pool.execute("""
         CREATE TABLE IF NOT EXISTS fb_mods (
             clone_id INT NOT NULL,
             user_id BIGINT NOT NULL,
@@ -1468,14 +1469,14 @@ async def start():
     main_client.add_handler(MessageHandler(safe_handler(main_on_message), filters.private))
     main_client.add_handler(CallbackQueryHandler(safe_handler(main_on_callback)))
 
-    # ---- SYSTEM channel ki join requests auto-approve ----
+    # ---- SYSTEM channel ki join REQUESTS record (approve nahi) ----
     async def main_on_join_request(_, jr):
         try:
-            sysr = await sys_fsub_row()
-            if not sysr or str(jr.chat.id) != str(sysr["chat_id"]):
-                return
-            if await _approve_join(_, jr.chat.id, jr.from_user.id):
-                print(f"[filebot] SYS join request APPROVED: user={jr.from_user.id}")
+            await pool.execute(
+                "INSERT INTO fb_jreq (chat_id, user_id) VALUES ($1,$2) "
+                "ON CONFLICT (chat_id, user_id) DO NOTHING",
+                str(jr.chat.id), jr.from_user.id)
+            print(f"[filebot] SYS join REQUEST saved: user={jr.from_user.id}")
         except Exception as e:
             print(f"[filebot] main jreq err: {str(e)[:80]}")
     main_client.add_handler(ChatJoinRequestHandler(safe_handler(main_on_join_request)))
