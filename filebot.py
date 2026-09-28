@@ -103,6 +103,18 @@ def sk(uid, cid=None):
     return (cid or "main", uid)
 
 
+def _is_not_joined(member) -> bool:
+    """pyrogram status ENUM ya STRING — dono me kaam kare"""
+    s = str(getattr(member, "status", "") or "").upper()
+    return ("LEFT" in s) or ("BANNED" in s) or ("KICKED" in s)
+
+
+def _is_adminish(member) -> bool:
+    """ADMIN / OWNER / MEMBER — teeno theek (enum + string dono)"""
+    s = str(getattr(member, "status", "") or "").upper()
+    return ("ADMINISTRATOR" in s) or ("OWNER" in s) or ("CREATOR" in s) or ("MEMBER" in s)
+
+
 def safe_handler(func):
     """handler crash ho to chup na rahe — error user ko dikhe + log ho"""
     async def wrapper(*a, **kw):
@@ -215,7 +227,7 @@ async def fsub_not_joined(cid, uid, client):
     if sysr and main_client:
         try:
             m = await main_client.get_chat_member(sysr["chat_id"], uid)
-            if m.status in ("left", "kicked"):
+            if _is_not_joined(m):
                 not_joined.append({"chat_id": str(sysr["chat_id"]),
                                    "title": sysr["title"], "link": SYSTEM_FSUB_LINK,
                                    "join_request": False, "system": True})
@@ -226,7 +238,7 @@ async def fsub_not_joined(cid, uid, client):
         try:
             m = await client.get_chat_member(int(r["chat_id"]) if r["chat_id"].lstrip("-").isdigit()
                                              else r["chat_id"], uid)
-            if m.status in ("left", "kicked"):
+            if _is_not_joined(m):
                 not_joined.append(r)
         except Exception:
             not_joined.append(r)
@@ -352,7 +364,7 @@ async def main_on_message(_, m):
             if chat.type in ("channel", "supergroup") and chat.id:
                 try:
                     member = await main_client.get_chat_member(chat.id, "me")
-                    if member.status in ("administrator", "creator"):
+                    if _is_adminish(member):
                         chats.append(chat)
                 except Exception:
                     pass
@@ -402,8 +414,8 @@ async def main_on_message(_, m):
             await m.reply("❌ Channel nahi mila ya bot usme add nahi hai.\n"
                           f"Detail: {str(e)[:100]}\n\nBot ko channel me ADMIN bana ke dobara bhejo!")
             return
-        mstatus = getattr(member, "status", "unknown")
-        if mstatus not in ("administrator", "creator", "member"):
+        mstatus = str(getattr(member, "status", "unknown"))
+        if not _is_adminish(member):
             clone_row = await load_clone(cid)
             bname = f"@{clone_row['bot_username']}" if clone_row and clone_row.get("bot_username") else "clone bot"
             await m.reply(
