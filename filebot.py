@@ -103,16 +103,19 @@ def sk(uid, cid=None):
     return (cid or "main", uid)
 
 
+def _status_str(member) -> str:
+    """'ChatMemberStatus.ADMINISTRATOR' → 'ADMINISTRATOR' (enum/string dono)"""
+    return str(getattr(member, "status", "") or "").upper().split(".")[-1].strip()
+
+
 def _is_not_joined(member) -> bool:
     """pyrogram status ENUM ya STRING — dono me kaam kare"""
-    s = str(getattr(member, "status", "") or "").upper()
-    return ("LEFT" in s) or ("BANNED" in s) or ("KICKED" in s)
+    return _status_str(member) in ("LEFT", "BANNED", "KICKED", "")
 
 
 def _is_adminish(member) -> bool:
     """ADMIN / OWNER / MEMBER — teeno theek (enum + string dono)"""
-    s = str(getattr(member, "status", "") or "").upper()
-    return ("ADMINISTRATOR" in s) or ("OWNER" in s) or ("CREATOR" in s) or ("MEMBER" in s)
+    return _status_str(member) in ("ADMINISTRATOR", "OWNER", "CREATOR", "MEMBER")
 
 
 def safe_handler(func):
