@@ -399,11 +399,19 @@ async def main_on_message(_, m):
             chat = await bot_client.get_chat(ref)
             member = await bot_client.get_chat_member(chat.id, "me")
         except Exception as e:
-            await m.reply("❌ Channel nahi mila ya bot admin nahi hai.\n"
+            await m.reply("❌ Channel nahi mila ya bot usme add nahi hai.\n"
                           f"Detail: {str(e)[:100]}\n\nBot ko channel me ADMIN bana ke dobara bhejo!")
             return
-        if member.status not in ("administrator", "creator"):
-            await m.reply("⚠️ Bot is channel me ADMIN nahi hai — pehle admin banao, phir link dobara bhejo!")
+        mstatus = getattr(member, "status", "unknown")
+        if mstatus not in ("administrator", "creator", "member"):
+            clone_row = await load_clone(cid)
+            bname = f"@{clone_row['bot_username']}" if clone_row and clone_row.get("bot_username") else "clone bot"
+            await m.reply(
+                f"⚠️ <b>{bname}</b> (CLONE bot) is channel me ADMIN nahi hai!\n"
+                f"(status jo mila: <code>{mstatus}</code>)\n\n"
+                f"👉 Channel ke admins me <b>{bname}</b> ko admin banao —\n"
+                "MAIN bot @AnimeFlixFile_bot NAHI — CLONE bot!\n"
+                "Phir link dobara bhejo!")
             return
         cnt = await pool.fetchval("SELECT count(*) FROM fb_fsub WHERE clone_id=$1", cid)
         if cnt >= MAX_FSUB - 1:
@@ -734,8 +742,16 @@ async def main_on_callback(_, cq):
             sub = data.split(":")
             if sub[1] == "add":
                 cid = int(sub[2])
-                states[sk(uid)] = {"flow": "startphoto", "cid": cid}
-                await cq.message.edit_text("🖼 Ab photo bhejo!")
+                clone = await load_clone(cid)
+                bname = f"@{clone['bot_username']}" if clone and clone.get("bot_username") else "clone bot"
+                await cq.message.edit_text(
+                    f"🖼 <b>Photo ka rule:</b> photo CLONE bot ke paas set hoti hai\n"
+                    f"(photo ka ID har bot ke liye alag hota hai — isliye!)\n\n"
+                    f"1️⃣ {bname} kholo\n"
+                    "2️⃣ /setphoto bhejo\n"
+                    "3️⃣ Photo bhejo — DONE! ✅")
+                await cq.answer()
+                return
             elif sub[1] == "del":
                 cid = int(sub[2])
                 await pool.execute("UPDATE fb_clones SET start_photo=NULL WHERE id=$1", cid)
@@ -927,8 +943,13 @@ def make_clone_handlers(cid):
             welcome = clone["start_msg"] or DEFAULT_CLONE_WELCOME
             kb = clone_welcome_kb()
             if clone["start_photo"]:
-                await _.send_photo(uid, clone["start_photo"], caption=welcome.format(name=name),
-                                   reply_markup=kb)
+                try:
+                    await _.send_photo(uid, clone["start_photo"], caption=welcome.format(name=name),
+                                       reply_markup=kb)
+                except Exception:
+                    # kharab/purani file_id — saaf karke text welcome bhejo
+                    await pool.execute("UPDATE fb_clones SET start_photo=NULL WHERE id=$1", cid)
+                    await _.send_message(uid, welcome.format(name=name), reply_markup=kb)
             else:
                 await _.send_message(uid, welcome.format(name=name), reply_markup=kb)
             return
@@ -945,6 +966,13 @@ def make_clone_handlers(cid):
 
         if text.startswith("/id"):
             await _.send_message(uid, f"🆔 Tumhara ID: <code>{uid}</code>")
+            return
+
+        if text.startswith("/setphoto"):
+            if not mod:
+                return
+            states[sk(uid, cid)] = {"flow": "setphoto"}
+            await _.send_message(uid, "🖼 Ab photo bhejo — ye welcome photo ban jayegi!")
             return
 
         if text.startswith("/stats"):
@@ -1085,6 +1113,13 @@ def make_clone_handlers(cid):
         # ---- state-based file collection ----
         st = states.get(sk(uid, cid))
         if st:
+            if st.get("flow") == "setphoto":
+                if m.photo:
+                    await pool.execute("UPDATE fb_clones SET start_photo=$1 WHERE id=$2",
+                                       m.photo.file_id, cid)
+                    states.pop(sk(uid, cid), None)
+                    await _.send_message(uid, "✅ Start photo save ho gayi! /start se dekho.")
+                return
             has_media = m.video or m.document or m.audio or m.photo or m.animation
             if st.get("flow") == "genlink":
                 if has_media:
