@@ -22,7 +22,7 @@ import secrets
 import asyncio
 import asyncpg
 from pyrogram import Client, filters
-from pyrogram.handlers import MessageHandler, CallbackQueryHandler
+from pyrogram.handlers import MessageHandler, CallbackQueryHandler, ChatJoinRequestHandler
 from pyrogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from pyrogram.errors import FloodWait, UserIsBlocked, InputUserDeactivated
 
@@ -187,24 +187,40 @@ def chat_ref(s):
     return int(s) if s.lstrip("-").isdigit() else s
 
 
-async def _export_link(client, chat_id, join_request=False):
-    """Invite link — join_request=True ho to REQUEST wali link (direct add nahi)"""
-    if join_request:
-        try:
-            from pyrogram.raw.functions.messages import ExportChatInvite
-            peer = await client.resolve_peer(chat_id)
+async def _export_link(client, chat_id, join_request=False, access_hash=0, username=None):
+    """peer-loss-proof invite link — deploy ke baad bhi kaam kare.
+    join_request=True ho to REQUEST wali link (direct add nahi)"""
+    peer = None
+    try:
+        peer = await client.resolve_peer(chat_id)
+    except Exception:
+        s = str(chat_id)
+        if access_hash and s.lstrip("-").isdigit():
+            try:
+                from pyrogram.raw.types import InputPeerChannel
+                cid = int(s[4:]) if s.startswith("-100") else abs(int(s))
+                peer = InputPeerChannel(channel_id=cid, access_hash=int(access_hash))
+            except Exception:
+                peer = None
+        if peer is None and username:
+            try:
+                peer = await client.resolve_peer(username)
+            except Exception:
+                return None
+    if peer is None:
+        return None
+    try:
+        from pyrogram.raw.functions.messages import ExportChatInvite
+        if join_request:
             try:
                 r = await client.invoke(ExportChatInvite(peer=peer, request_needed=True))
             except TypeError:
                 r = await client.invoke(ExportChatInvite(peer=peer, creates_join_request=True))
-            link = getattr(r, "link", None)
-            if link:
-                return link
-        except Exception as e:
-            print(f"[filebot] jr-link fail: {str(e)[:80]}")
-    try:
-        return await client.export_chat_invite_link(chat_id)
-    except Exception:
+        else:
+            r = await client.invoke(ExportChatInvite(peer=peer))
+        return getattr(r, "link", None)
+    except Exception as e:
+        print(f"[filebot] export fail: {str(e)[:70]}")
         return None
 
 
@@ -243,28 +259,65 @@ def link_kb(url):
 
 # ---------------- force sub ----------------
 
+async def _is_member(client, r, uid):
+    """True=member | False=nahi | None=pata nahi.
+    Username se (public) ya access_hash se (private) — DEPLOY KE BAAD BHI kaam kare."""
+    rd = dict(r) if not isinstance(r, dict) else r
+    uname = rd.get("username")
+    if uname:
+        try:
+            m = await client.get_chat_member(uname, uid)
+            return not _is_not_joined(m)
+        except Exception:
+            pass
+    try:
+        s = str(rd.get("chat_id"))
+        cid = int(s[4:]) if s.startswith("-100") else abs(int(s))
+        ah = int(rd.get("access_hash") or 0)
+        if ah:
+            from pyrogram.raw.functions.channels import GetParticipant
+            from pyrogram.raw.types import InputChannel, InputUser
+            await client.invoke(GetParticipant(
+                channel=InputChannel(channel_id=cid, access_hash=ah),
+                participant=InputUser(user_id=uid, access_hash=0)))
+            return True
+    except Exception as e:
+        if "PARTICIPANT" in str(e).upper():
+            return False
+    return None
+
+
+async def _approve_join(client, chat_id, user_id):
+    """join request ko turant approve karo (video-wale bot jaisa)"""
+    try:
+        from pyrogram.raw.functions.messages import HideChatJoinRequest
+        from pyrogram.raw.types import InputUser
+        peer = await client.resolve_peer(chat_id)
+        await client.invoke(HideChatJoinRequest(
+            peer=peer, user_id=InputUser(user_id=user_id, access_hash=0), approved=True))
+        return True
+    except Exception as e:
+        print(f"[filebot] approve fail: {str(e)[:70]}")
+        return False
+
+
 async def fsub_not_joined(cid, uid, client):
     """list of fsub rows user ne join nahi kiye — SYSTEM wala hamesha sabse pehle"""
     not_joined = []
     # ---- SYSTEM force sub (owner ka — LOCKED, koi hata nahi sakta) ----
     sysr = await sys_fsub_row()
     if sysr and main_client:
-        try:
-            m = await main_client.get_chat_member(sysr["chat_id"], uid)
-            if _is_not_joined(m):
-                not_joined.append({"chat_id": str(sysr["chat_id"]),
-                                   "title": sysr["title"], "link": SYSTEM_FSUB_LINK,
-                                   "join_request": False, "system": True})
-        except Exception:
-            pass  # verify nahi ho paya — skip (soft)
+        uname = await get_setting("sys_fsub_username")
+        ah = int(await get_setting("sys_fsub_access_hash", 0) or 0)
+        pseudo = {"chat_id": str(sysr["chat_id"]), "username": uname, "access_hash": ah}
+        if await _is_member(main_client, pseudo, uid) is False:
+            not_joined.append({"chat_id": str(sysr["chat_id"]),
+                               "title": sysr["title"], "link": SYSTEM_FSUB_LINK,
+                               "join_request": False, "system": True,
+                               "username": uname, "access_hash": ah})
     rows = await pool.fetch("SELECT * FROM fb_fsub WHERE clone_id=$1", cid)
     for r in rows:
-        try:
-            m = await client.get_chat_member(int(r["chat_id"]) if r["chat_id"].lstrip("-").isdigit()
-                                             else r["chat_id"], uid)
-            if _is_not_joined(m):
-                not_joined.append(r)
-        except Exception:
+        if await _is_member(client, r, uid) is False:
             not_joined.append(r)
     return not_joined
 
@@ -275,27 +328,26 @@ async def join_buttons(cid, uid, client, lid):
         return None
     kb = []
     for r in rows:
-        link = r["link"]
-        title = r["title"] or "Channel"
-        try:
-            sys_row = bool(r["system"])
-        except Exception:
-            sys_row = False
-        icon = "🔒" if sys_row else "📢"
+        rd = dict(r) if not isinstance(r, dict) else r
+        link = rd.get("link")
+        title = rd.get("title") or "Channel"
         if not link:
-            # link regenerate karne ki koshish (join-request mode ka dhyan rakhte hue)
+            # link regenerate (peer-loss-proof: hash + username ke saath)
             try:
-                link = await _export_link(client, chat_ref(r["chat_id"]),
-                                          join_request=bool(r["join_request"]))
+                link = await _export_link(client, chat_ref(rd.get("chat_id")),
+                                          join_request=bool(rd.get("join_request")),
+                                          access_hash=int(rd.get("access_hash") or 0),
+                                          username=rd.get("username"))
                 if link:
-                    await pool.execute("UPDATE fb_fsub SET link=$1 WHERE clone_id=$2 AND chat_id=$3",
-                                       link, cid, r["chat_id"])
+                    await pool.execute(
+                        "UPDATE fb_fsub SET link=$1 WHERE clone_id=$2 AND chat_id=$3",
+                        link, cid, rd.get("chat_id"))
             except Exception:
                 link = None
         if link:
-            kb.append([InlineKeyboardButton(f"{icon} Join — {title}", url=link)])
+            kb.append([InlineKeyboardButton("JOIN NOW", url=link)])
         else:
-            kb.append([InlineKeyboardButton(f"⚠️ {title} (link missing)", callback_data="noop")])
+            kb.append([InlineKeyboardButton(f"⚠️ {title} — link missing", callback_data="noop")])
     kb.append([InlineKeyboardButton("✅ TRY AGAIN", callback_data=f"try:{lid}")])
     return InlineKeyboardMarkup(kb)
 
@@ -454,17 +506,23 @@ async def main_on_message(_, m):
         if cnt >= MAX_FSUB - 1:
             await m.reply(f"⚠️ Limit full — max {MAX_FSUB - 1} channels (1 system LOCKED slot)")
             return
+        ah = 0
+        try:
+            p = await bot_client.resolve_peer(chat.id)
+            ah = int(getattr(p, "access_hash", 0) or 0)
+        except Exception:
+            pass
         link = None
         try:
-            link = await bot_client.export_chat_invite_link(chat.id)
+            link = await _export_link(bot_client, chat.id, access_hash=ah)
         except Exception:
             pass
         if chat.username:
             pub = f"https://t.me/{chat.username}"
             await pool.execute(
-                "INSERT INTO fb_fsub (clone_id, chat_id, title, link, join_request) "
-                "VALUES ($1,$2,$3,$4,false) ON CONFLICT (clone_id, chat_id) DO NOTHING",
-                cid, str(chat.id), chat.title or "Channel", pub)
+                "INSERT INTO fb_fsub (clone_id, chat_id, title, link, join_request, access_hash, username) "
+                "VALUES ($1,$2,$3,$4,false,$5,$6) ON CONFLICT (clone_id, chat_id) DO NOTHING",
+                cid, str(chat.id), chat.title or "Channel", pub, ah, chat.username)
             await m.reply(f"✅ Force-sub ADD: {chat.title}\n🔗 {pub}")
             return
         kb = InlineKeyboardMarkup([
@@ -609,13 +667,25 @@ async def main_on_callback(_, cq):
             return
         if data.startswith("syspick:"):
             chat_id = int(data.split(":")[1])
+            title = "Update Channel"
+            ah = 0
+            uname = None
             try:
                 chat = await main_client.get_chat(chat_id)
                 title = chat.title or "Update Channel"
+                uname = getattr(chat, "username", None)
             except Exception:
-                title = "Update Channel"
+                chat = None
+            try:
+                p = await main_client.resolve_peer(chat_id)
+                ah = int(getattr(p, "access_hash", 0) or 0)
+            except Exception:
+                pass
             await set_setting("sys_fsub_chat_id", chat_id)
             await set_setting("sys_fsub_title", title)
+            await set_setting("sys_fsub_access_hash", ah)
+            if uname:
+                await set_setting("sys_fsub_username", uname)
             await pool.execute("DELETE FROM fb_fsub WHERE chat_id=$1", str(chat_id))
             await cq.message.edit_text(
                 f"✅ <b>SYSTEM force-sub set: {title}</b>\n\n"
@@ -870,13 +940,21 @@ async def main_on_callback(_, cq):
             bot_client = clone_clients.get(cid)
             link = None
             title = "Channel"
+            ah = 0
+            uname = None
             if bot_client:
                 try:
                     ch = await bot_client.get_chat(cid_int)
                     title = ch.title or "Channel"
+                    uname = getattr(ch, "username", None)
                 except Exception:
                     pass
-                link = await _export_link(bot_client, cid_int, join_request=jr)
+                try:
+                    p = await bot_client.resolve_peer(cid_int)
+                    ah = int(getattr(p, "access_hash", 0) or 0)
+                except Exception:
+                    pass
+                link = await _export_link(bot_client, cid_int, join_request=jr, access_hash=ah)
             if not link:
                 states[sk(uid)] = {"flow": "fsublink", "cid": cid, "chat_id": str(cid_int), "jr": jr}
                 await cq.message.edit_text(
@@ -885,9 +963,9 @@ async def main_on_callback(_, cq):
                 await cq.answer()
                 return
             await pool.execute(
-                "INSERT INTO fb_fsub (clone_id, chat_id, title, link, join_request) "
-                "VALUES ($1,$2,$3,$4,$5) ON CONFLICT (clone_id, chat_id) DO NOTHING",
-                cid, str(cid_int), title, link, jr)
+                "INSERT INTO fb_fsub (clone_id, chat_id, title, link, join_request, access_hash, username) "
+                "VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (clone_id, chat_id) DO NOTHING",
+                cid, str(cid_int), title, link, jr, ah, uname)
             await cq.message.edit_text(f"✅ Force-sub add ho gaya! (mode: {'join-request' if jr else 'normal'})\n🔗 <code>{link}</code>")
             await cq.answer()
             return
@@ -1270,7 +1348,19 @@ def make_clone_handlers(cid):
             except Exception:
                 pass
 
-    return on_message, on_callback
+    # ---- join request AUTO-APPROVE (force-sub channels ke liye) ----
+    async def on_join_request(_, jr):
+        try:
+            rows = await pool.fetch("SELECT chat_id FROM fb_fsub WHERE clone_id=$1", cid)
+            allowed = {str(r["chat_id"]) for r in rows}
+            if str(jr.chat.id) not in allowed:
+                return
+            if await _approve_join(_, jr.chat.id, jr.from_user.id):
+                print(f"[filebot] join request APPROVED: user={jr.from_user.id} chat={jr.chat.id}")
+        except Exception as e:
+            print(f"[filebot] jreq err: {str(e)[:80]}")
+
+    return on_message, on_callback, on_join_request
 
 
 # =========================================================
@@ -1285,9 +1375,10 @@ async def boot_clone(clone):
     try:
         c = Client(f"clone_{cid}", api_id=API_ID, api_hash=API_HASH,
                    bot_token=clone["token"], in_memory=True)
-        on_msg, on_cb = make_clone_handlers(cid)
+        on_msg, on_cb, on_jr = make_clone_handlers(cid)
         c.add_handler(MessageHandler(safe_handler(on_msg), filters.private))
         c.add_handler(CallbackQueryHandler(safe_handler(on_cb)))
+        c.add_handler(ChatJoinRequestHandler(safe_handler(on_jr)))
         await c.start()
         me = await c.get_me()
         if me.username and me.username != clone.get("bot_username"):
@@ -1329,8 +1420,13 @@ async def start():
             title TEXT,
             link TEXT,
             join_request BOOLEAN DEFAULT false,
+            access_hash BIGINT DEFAULT 0,
+            username TEXT,
             UNIQUE (clone_id, chat_id)
         )""")
+    # purane DB me naye columns add karo (safe — pehle se ho to skip)
+    await pool.execute("ALTER TABLE fb_fsub ADD COLUMN IF NOT EXISTS access_hash BIGINT DEFAULT 0")
+    await pool.execute("ALTER TABLE fb_fsub ADD COLUMN IF NOT EXISTS username TEXT")
     await pool.execute("""
         CREATE TABLE IF NOT EXISTS fb_mods (
             clone_id INT NOT NULL,
@@ -1371,6 +1467,18 @@ async def start():
                          bot_token=TOKEN, in_memory=True)
     main_client.add_handler(MessageHandler(safe_handler(main_on_message), filters.private))
     main_client.add_handler(CallbackQueryHandler(safe_handler(main_on_callback)))
+
+    # ---- SYSTEM channel ki join requests auto-approve ----
+    async def main_on_join_request(_, jr):
+        try:
+            sysr = await sys_fsub_row()
+            if not sysr or str(jr.chat.id) != str(sysr["chat_id"]):
+                return
+            if await _approve_join(_, jr.chat.id, jr.from_user.id):
+                print(f"[filebot] SYS join request APPROVED: user={jr.from_user.id}")
+        except Exception as e:
+            print(f"[filebot] main jreq err: {str(e)[:80]}")
+    main_client.add_handler(ChatJoinRequestHandler(safe_handler(main_on_join_request)))
     await main_client.start()
     main_me = await main_client.get_me()
     print(f"[filebot] MAIN bot LIVE: @{main_me.username}")
