@@ -187,6 +187,27 @@ def chat_ref(s):
     return int(s) if s.lstrip("-").isdigit() else s
 
 
+async def _export_link(client, chat_id, join_request=False):
+    """Invite link — join_request=True ho to REQUEST wali link (direct add nahi)"""
+    if join_request:
+        try:
+            from pyrogram.raw.functions.messages import ExportChatInvite
+            peer = await client.resolve_peer(chat_id)
+            try:
+                r = await client.invoke(ExportChatInvite(peer=peer, creates_join_request=True))
+            except TypeError:
+                r = await client.invoke(ExportChatInvite(peer=peer, request_needed=True))
+            link = getattr(r, "link", None)
+            if link:
+                return link
+        except Exception as e:
+            print(f"[filebot] jr-link fail: {str(e)[:80]}")
+    try:
+        return await client.export_chat_invite_link(chat_id)
+    except Exception:
+        return None
+
+
 def parse_tme_link(u):
     if not u:
         return None, None
@@ -262,12 +283,13 @@ async def join_buttons(cid, uid, client, lid):
             sys_row = False
         icon = "🔒" if sys_row else "📢"
         if not link:
-            # link regenerate karne ki koshish
+            # link regenerate karne ki koshish (join-request mode ka dhyan rakhte hue)
             try:
-                link = await client.export_chat_invite_link(
-                    int(r["chat_id"]) if r["chat_id"].lstrip("-").isdigit() else r["chat_id"])
-                await pool.execute("UPDATE fb_fsub SET link=$1 WHERE clone_id=$2 AND chat_id=$3",
-                                  link, cid, r["chat_id"])
+                link = await _export_link(client, chat_ref(r["chat_id"]),
+                                          join_request=bool(r["join_request"]))
+                if link:
+                    await pool.execute("UPDATE fb_fsub SET link=$1 WHERE clone_id=$2 AND chat_id=$3",
+                                       link, cid, r["chat_id"])
             except Exception:
                 link = None
         if link:
@@ -854,10 +876,7 @@ async def main_on_callback(_, cq):
                     title = ch.title or "Channel"
                 except Exception:
                     pass
-                try:
-                    link = await bot_client.export_chat_invite_link(cid_int)
-                except Exception:
-                    pass
+                link = await _export_link(bot_client, cid_int, join_request=jr)
             if not link:
                 states[sk(uid)] = {"flow": "fsublink", "cid": cid, "chat_id": str(cid_int), "jr": jr}
                 await cq.message.edit_text(
