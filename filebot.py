@@ -32,6 +32,29 @@ TOKEN = os.getenv("FILESTORE_BOT_TOKEN", "").strip()
 DB_URL = os.getenv("DATABASE_URL", "")
 SUPER_OWNER = int(os.getenv("OWNER_ID", "0") or 0)
 UPDATE_LINK = os.getenv("FB_UPDATE_LINK", "https://t.me/+MDBQWN7fQgJmZjBl")
+SYSTEM_FSUB_LINK = os.getenv("FB_SYS_FSUB_LINK", "https://t.me/+_hPJlkI9jNBmMTU1")  # owner ka LOCKED fsub
+
+
+async def get_setting(key, default=None):
+    try:
+        v = await pool.fetchval("SELECT value FROM fb_settings WHERE key=$1", key)
+    except Exception:
+        return default
+    return v if v is not None else default
+
+
+async def set_setting(key, value):
+    await pool.execute(
+        "INSERT INTO fb_settings (key, value) VALUES ($1,$2) ON CONFLICT (key) DO UPDATE SET value=$2",
+        key, str(value))
+
+
+async def sys_fsub_row():
+    """configured system fsub — {chat_id, title} warna None"""
+    cid = await get_setting("sys_fsub_chat_id")
+    if not cid or not str(cid).lstrip("-").isdigit():
+        return None
+    return {"chat_id": int(cid), "title": await get_setting("sys_fsub_title") or "Update Channel"}
 MAX_CLONES_PER_USER = 6
 MAX_FSUB = 6
 MAX_TOTAL = int(os.getenv("FB_MAX_CLONES", "25") or 25)
@@ -165,9 +188,20 @@ def link_kb(url):
 # ---------------- force sub ----------------
 
 async def fsub_not_joined(cid, uid, client):
-    """list of fsub rows user ne join nahi kiye"""
-    rows = await pool.fetch("SELECT * FROM fb_fsub WHERE clone_id=$1", cid)
+    """list of fsub rows user ne join nahi kiye — SYSTEM wala hamesha sabse pehle"""
     not_joined = []
+    # ---- SYSTEM force sub (owner ka — LOCKED, koi hata nahi sakta) ----
+    sysr = await sys_fsub_row()
+    if sysr and main_client:
+        try:
+            m = await main_client.get_chat_member(sysr["chat_id"], uid)
+            if m.status in ("left", "kicked"):
+                not_joined.append({"chat_id": str(sysr["chat_id"]),
+                                   "title": sysr["title"], "link": SYSTEM_FSUB_LINK,
+                                   "join_request": False, "system": True})
+        except Exception:
+            pass  # verify nahi ho paya — skip (soft)
+    rows = await pool.fetch("SELECT * FROM fb_fsub WHERE clone_id=$1", cid)
     for r in rows:
         try:
             m = await client.get_chat_member(int(r["chat_id"]) if r["chat_id"].lstrip("-").isdigit()
@@ -187,6 +221,11 @@ async def join_buttons(cid, uid, client, lid):
     for r in rows:
         link = r["link"]
         title = r["title"] or "Channel"
+        try:
+            sys_row = bool(r["system"])
+        except Exception:
+            sys_row = False
+        icon = "🔒" if sys_row else "📢"
         if not link:
             # link regenerate karne ki koshish
             try:
@@ -197,7 +236,7 @@ async def join_buttons(cid, uid, client, lid):
             except Exception:
                 link = None
         if link:
-            kb.append([InlineKeyboardButton(f"📢 Join — {title}", url=link)])
+            kb.append([InlineKeyboardButton(f"{icon} Join — {title}", url=link)])
         else:
             kb.append([InlineKeyboardButton(f"⚠️ {title} (link missing)", callback_data="noop")])
     kb.append([InlineKeyboardButton("✅ TRY AGAIN", callback_data=f"try:{lid}")])
@@ -282,6 +321,30 @@ async def main_on_message(_, m):
             f"✰ ᴍʏ ᴏᴡɴᴇʀ: <a href='tg://user?id={SUPER_OWNER}'>Lovely anime</a>\n"
             f"✰ ᴜᴘᴅᴀᴛᴇs: <a href='{UPDATE_LINK}'>Update Channel</a>\n"
             f"✰ ᴄᴏɴᴛᴀᴄᴛ ꜰᴏʀ ʙᴏᴛ ᴅᴇᴠᴇʟᴏᴘɪɴɢ: <a href='tg://user?id={SUPER_OWNER}'>AnimeFlix</a>")
+        return
+
+    if text.startswith("/set_sys"):
+        if uid != SUPER_OWNER:
+            return
+        chats = []
+        async for d in main_client.get_dialogs(limit=100):
+            chat = d.chat
+            if chat.type in ("channel", "supergroup") and chat.id:
+                try:
+                    member = await main_client.get_chat_member(chat.id, "me")
+                    if member.status in ("administrator", "creator"):
+                        chats.append(chat)
+                except Exception:
+                    pass
+        if not chats:
+            await m.reply("❌ Koi admin channel nahi mila — pehle mujhe (@AnimeFlixFile_bot) apne channel me ADMIN banao!")
+            return
+        kb = [[InlineKeyboardButton(f"🔒 {c.title or c.id}", callback_data=f"syspick:{c.id}")]
+              for c in chats[:15]]
+        await m.reply(
+            "🔒 <b>SYSTEM FORCE-SUB setup</b>\nApna wo channel chuno jo SAB clones me "
+            "hamesha LOCKED rahega (koi owner remove nahi kar payega):",
+            reply_markup=InlineKeyboardMarkup(kb))
         return
 
     st = states.get(sk(uid))
@@ -411,6 +474,26 @@ async def main_on_callback(_, cq):
         if data == "noop":
             await cq.answer("Link missing — owner ko bolo bot ko admin banaye")
             return
+        if data == "syslock":
+            await cq.answer("🔒 Ye SYSTEM force-sub hai — isko koi remove NAHI kar sakta!", show_alert=True)
+            return
+        if data.startswith("syspick:"):
+            chat_id = int(data.split(":")[1])
+            try:
+                chat = await main_client.get_chat(chat_id)
+                title = chat.title or "Update Channel"
+            except Exception:
+                title = "Update Channel"
+            await set_setting("sys_fsub_chat_id", chat_id)
+            await set_setting("sys_fsub_title", title)
+            await pool.execute("DELETE FROM fb_fsub WHERE chat_id=$1", str(chat_id))
+            await cq.message.edit_text(
+                f"✅ <b>SYSTEM force-sub set: {title}</b>\n\n"
+                f"🔗 {SYSTEM_FSUB_LINK}\n\n"
+                "Ab ye channel HAR clone me LOCKED rahega —\n"
+                "join kiye bina kisi ko file nahi milegi! 🔒")
+            await cq.answer()
+            return
         if data == "manage":
             clones = await pool.fetch("SELECT * FROM fb_clones WHERE owner_id=$1 ORDER BY id", uid)
             if uid == SUPER_OWNER:
@@ -499,18 +582,22 @@ async def main_on_callback(_, cq):
                                            reply_markup=kb)
             elif what == "fsub":
                 frows = await pool.fetch("SELECT * FROM fb_fsub WHERE clone_id=$1", cid)
-                kb = []
+                sysr = await sys_fsub_row()
+                kb = [[InlineKeyboardButton(
+                    f"🔒 {sysr['title'] if sysr else 'System Channel'} — LOCKED 🔒",
+                    callback_data="syslock")]]
                 for r in frows:
                     kb.append([InlineKeyboardButton(
                         f"❌ {r['title'] or r['chat_id']}" + (" (join-req)" if r["join_request"] else ""),
                         callback_data=f"fsubdel:{cid}:{r['chat_id'].lstrip('-')}")])
-                if len(frows) < MAX_FSUB:
+                if len(frows) < MAX_FSUB - 1:
                     kb.append([InlineKeyboardButton("➕ ADD CHANNEL", callback_data=f"fsubadd:{cid}")])
                 kb.append([InlineKeyboardButton("🔙 BACK", callback_data=f"clone:{cid}")])
                 await cq.message.edit_text(
-                    f"🔒 <b>Force Sub ({len(frows)}/{MAX_FSUB})</b>\n"
+                    f"🔒 <b>Force Sub ({len(frows) + 1}/{MAX_FSUB} — 1 LOCKED)</b>\n"
                     "Users ko file tabhi milegi jab wo ye channels join kare.\n"
-                    "Add karne ke liye bot ko pehle channel me <b>admin</b> banao!",
+                    "🔒 wala SYSTEM channel hai — isko koi remove nahi kar sakta!\n"
+                    "➕ Add karne ke liye bot ko pehle channel me <b>admin</b> banao!",
                     reply_markup=InlineKeyboardMarkup(kb))
             elif what == "mods":
                 mrows = await pool.fetch("SELECT user_id FROM fb_mods WHERE clone_id=$1", cid)
@@ -1127,6 +1214,11 @@ async def start():
             clone_id INT NOT NULL,
             user_id BIGINT NOT NULL,
             UNIQUE (clone_id, user_id)
+        )""")
+    await pool.execute("""
+        CREATE TABLE IF NOT EXISTS fb_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT
         )""")
 
     main_client = Client("filebot_main", api_id=API_ID, api_hash=API_HASH,
