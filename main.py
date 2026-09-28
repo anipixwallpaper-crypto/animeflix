@@ -40,7 +40,19 @@ CHUNK = 1024 * 1024
 async def lifespan(app):
     await init_db()
     await tg.start()
+    # ----- File Store Bot (FILESTORE_BOT_TOKEN ho to ON) -----
+    try:
+        import filebot
+        await filebot.start()
+    except Exception as e:
+        print("[filebot] OFF:", str(e)[:150])
+    # ---------------------------------------------------------
     yield
+    try:
+        import filebot
+        await filebot.stop()
+    except Exception:
+        pass
     await tg.stop()
 
 
