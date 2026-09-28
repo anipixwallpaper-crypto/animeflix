@@ -1,24 +1,19 @@
 """
-FILE STORE BOT — AnimeFlix ke saath
-====================================
-Video wale jaisa file store bot: files ko PERMANENT shareable link me badalta hai.
+FILE STORE BOT v2 — MAIN BOT + CLONE SYSTEM
+=============================================
+MAIN BOT (FILESTORE_BOT_TOKEN): sirf CLONE FACTORY —
+  - koi bhi user /start kare → CREATE MY OWN CLONE → token bheje → uska apna file store bot ready
+  - max 6 clones per user, max 6 force-sub per clone
+CLONE BOTS: asli file store —
+  - /genlink, /special_link (create+modify+delete+edit), /batch, /broadcast, /ban, /unban, /stats
+  - file bhejne se kuch NAHI hota — sirf command ke baad (owner order)
+  - force sub: join now + try again; private channel pe join-request ya normal mode
 
-ENV VARS (Render pe daalna):
-  FILESTORE_BOT_TOKEN  — BotFather se mila token (is se bot ON hota hai)
-  OWNER_ID             — tumhara Telegram user ID (mods ke commands ke liye)
-  FORCE_SUB            — optional, comma-separated @channelusernames
-  AUTO_DELETE          — optional seconds (file itne sec baad auto-delete, 0=off)
-  FS_CUSTOM_CAPTION    — optional, delivered file ka caption ({filename} use karo)
-  FS_CUSTOM_BTN        — optional "Button Text|https://url"
-  FS_STORAGE_CHANNEL   — optional -100xxx channel id (permanent storage ke liye, bot admin ho)
-
-Commands:
-  /start — menu | /start <link> — file lo
-  /id — apna ID
-  /genlink — (reply ya seedha file bhejo) link banao
-  /batch <link1> <link2> — range ka ek link
-  /broadcast — (reply) sab users ko bhejo
-  /ban /unban /stats — owner
+ENV:
+  FILESTORE_BOT_TOKEN — MAIN bot ka token
+  OWNER_ID            — asli malik (super admin)
+  FB_UPDATE_LINK     — update channel ka link (default: owner ka diya hua)
+  FB_MAX_CLONES      — total clones limit (default 25)
 """
 import os
 import re
@@ -35,74 +30,106 @@ API_ID = int(os.getenv("API_ID", "0") or 0)
 API_HASH = os.getenv("API_HASH", "")
 TOKEN = os.getenv("FILESTORE_BOT_TOKEN", "").strip()
 DB_URL = os.getenv("DATABASE_URL", "")
-OWNER_IDS = {int(x) for x in re.split(r"[,\s]+", os.getenv("OWNER_ID", "")) if x.strip().isdigit()}
-FORCE_SUBS = [x.strip() for x in re.split(r"[,\s]+", os.getenv("FORCE_SUB", "")) if x.strip() and not x.strip().isdigit()]
-FORCE_IDS = [int(x) for x in re.split(r"[,\s]+", os.getenv("FORCE_SUB", "")) if x.strip().lstrip("-").isdigit()]
-AUTO_DELETE = int(os.getenv("AUTO_DELETE", "0") or 0)
-CUSTOM_CAPTION = os.getenv("FS_CUSTOM_CAPTION", "")
-CUSTOM_BTN_RAW = os.getenv("FS_CUSTOM_BTN", "")
-STORAGE_CHANNEL = os.getenv("FS_STORAGE_CHANNEL", "")
+SUPER_OWNER = int(os.getenv("OWNER_ID", "0") or 0)
+UPDATE_LINK = os.getenv("FB_UPDATE_LINK", "https://t.me/+MDBQWN7fQgJmZjBl")
+MAX_CLONES_PER_USER = 6
+MAX_FSUB = 6
+MAX_TOTAL = int(os.getenv("FB_MAX_CLONES", "25") or 25)
 
-client = None
 pool = None
-bot_me = None
+main_client = None
+main_me = None
+clone_clients = {}   # clone_id -> Client
+states = {}          # key -> state dict
 
-WELCOME = (
+DEFAULT_CLONE_WELCOME = (
     "Hello {name} ✨,\n\n"
     "I am a permanent file store bot — "
-    "mujhe file bhejo, main shareable link bana dunga.\n"
+    "moderators mujhe files bhejte hain, main shareable permanent link deta hoon.\n"
     "Link kholne wale ko file turant mil jayegi.\n\n"
-    "To know more click help button"
+    "To know more click menu button"
 )
-HELP_TEXT = (
+CLONE_HELP = (
     "✨ <b>Help Menu</b>\n\n"
     "I am a permanent file store bot.\n"
-    "Moderators file bhejte hain — main shareable link deta hoon.\n"
-    "Koi bhi link kholke file le sakta hai.\n\n"
-    "<b>📝 Commands:</b>\n"
-    "/start — main menu\n"
-    "/id — apna Telegram ID dekho\n\n"
-    "<b>🔧 Moderators:</b>\n"
-    "/genlink — file ka link banao (reply karke ya seedha file bhejo)\n"
-    "/batch <code>link1 link2</code> — channel range ka ek link\n"
-    "/broadcast — reply karke sab users ko bhejo\n"
-    "/stats — total users/files\n"
-    "/ban /unban — user control\n\n"
-    "💡 <b>Tip:</b> moderator seedha koi bhi file bhejega — link khud ban jayega!"
+    "Moderators files store karte hain — users link se lete hain.\n\n"
+    "<b>👤 Users:</b>\n"
+    "/start — menu | link kholo file lo\n"
+    "/menu — ye menu | /about — mere baare me\n\n"
+    "<b>🔧 Moderators/Owner:</b>\n"
+    "/genlink — ek file ka link (command ke baad file bhejo)\n"
+    "/special_link — kai files ka EK edit hone wala link\n"
+    "/batch <code>link1 link2</code> — channel range ka link\n"
+    "/broadcast — (reply) sab users ko message\n"
+    "/ban /unban — user control | /stats — stats"
 )
-ABOUT_TEXT = (
-    "✨ <b>About Me</b>\n\n"
-    "⭐ <b>Name:</b> {bot}\n"
-    "⭐ <b>Type:</b> Permanent File Store Bot\n"
-    "⭐ <b>Storage:</b> Telegram + Neon DB\n"
-    "⭐ <b>Powered by:</b> AnimeFlix"
+MAIN_WELCOME = (
+    "Hello {name} ✨,\n\n"
+    "Ye <b>AnimeFlix File Store</b> ka MAIN bot hai 🤖\n\n"
+    "Mujh se apna <b>khud ka FILE STORE BOT</b> banao —\n"
+    "bilkul mere jaisa, TUMHARE control me!\n\n"
+    "1️⃣ @BotFather se naya bot banao (/newbot)\n"
+    "2️⃣ Jo token mile, yahan paste karo\n"
+    "3️⃣ Tumhara bot ready! 🎉\n\n"
+    "⚠️ Max 6 clones per user"
 )
 
 # ---------------- helpers ----------------
 
-def is_mod(uid):
-    return uid in OWNER_IDS
+def sk(uid, cid=None):
+    return (cid or "main", uid)
 
 
-def main_kb():
-    rows = [[InlineKeyboardButton("🆘 HELP", callback_data="help"),
-             InlineKeyboardButton("ℹ️ ABOUT", callback_data="about")]]
-    if CUSTOM_BTN_RAW and "|" in CUSTOM_BTN_RAW:
-        t, u = CUSTOM_BTN_RAW.split("|", 1)
-        rows.append([InlineKeyboardButton(t.strip(), url=u.strip())])
-    return InlineKeyboardMarkup(rows)
+def is_clone_mod(clone, uid):
+    if uid == SUPER_OWNER or uid == clone["owner_id"]:
+        return True
+    return bool(pool) and uid in clone.get("_mods", set())
 
 
-def btn_kb():
-    if CUSTOM_BTN_RAW and "|" in CUSTOM_BTN_RAW:
-        t, u = CUSTOM_BTN_RAW.split("|", 1)
-        return InlineKeyboardMarkup([[InlineKeyboardButton(t.strip(), url=u.strip())]])
+async def load_clone(cid):
+    row = await pool.fetchrow("SELECT * FROM fb_clones WHERE id=$1", cid)
+    if row:
+        mods = {r["user_id"] for r in await pool.fetch(
+            "SELECT user_id FROM fb_mods WHERE clone_id=$1", cid)}
+        d = dict(row)
+        d["_mods"] = mods
+        return d
     return None
 
 
+def main_link():
+    return f"https://t.me/{main_me.username}" if main_me else "https://t.me/AnimeFlixFile_bot"
+
+
+def clone_welcome_kb():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton("🆘 HELP", callback_data="help"),
+         InlineKeyboardButton("ℹ️ ABOUT", callback_data="about")],
+        [InlineKeyboardButton("📢 UPDATE CHANNEL", url=UPDATE_LINK)],
+        [InlineKeyboardButton("🤖 CREATE MY OWN CLONE", url=main_link())],
+    ])
+
+
+def about_text(clone, bot_name):
+    owner_name = clone.get("owner_name") or "Owner"
+    return (
+        "✨ ᴀʙᴏᴜᴛ ᴍᴇ\n\n"
+        f"✰ ᴍʏ ɴᴀᴍᴇ: {bot_name}\n"
+        f"✰ ᴄʟᴏɴᴇ ᴏꜰ: <a href='{main_link()}'>AnimeFlix File Store</a>\n"
+        f"✰ ᴍʏ ᴏᴡɴᴇʀ: <a href='tg://user?id={clone['owner_id']}'>{owner_name}</a>\n"
+        f"✰ ᴜᴘᴅᴀᴛᴇs: <a href='{main_link()}'>AnimeFlix File Store</a>\n"
+        f"✰ sᴜᴘᴘᴏʀᴛ: <a href='tg://user?id={SUPER_OWNER}'>Lovely anime</a>\n"
+        f"✰ ᴄᴏɴᴛᴀᴄᴛ ꜰᴏʀ ʙᴏᴛ ᴅᴇᴠᴇʟᴏᴘɪɴɢ: <a href='tg://user?id={SUPER_OWNER}'>AnimeFlix</a>"
+    )
+
+
+def chat_ref(s):
+    """'-100123' ya 'username' — jaisa pyrogram ko chahiye"""
+    s = str(s)
+    return int(s) if s.lstrip("-").isdigit() else s
+
+
 def parse_tme_link(u):
-    """https://t.me/c/2700515710/49 -> (-1002700515710, 49)
-       https://t.me/username/49 -> ('username', 49)"""
     if not u:
         return None, None
     u = u.strip()
@@ -115,309 +142,933 @@ def parse_tme_link(u):
     return None, None
 
 
-async def make_link(chat_id, msg_ids, by):
+async def make_link(cid, chat_id, msg_ids, by, special=False):
     lid = secrets.token_urlsafe(6).replace("-", "A").replace("_", "B")[:8]
     await pool.execute(
-        "INSERT INTO fs_files (link_id, chat_id, msg_ids, created_by) VALUES ($1,$2,$3,$4)",
-        lid, chat_id, json.dumps(msg_ids), by,
-    )
-    return lid, f"https://t.me/{bot_me.username}?start={lid}"
+        "INSERT INTO fb_files (link_id, clone_id, chat_id, msg_ids, created_by, special) "
+        "VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (link_id) DO NOTHING",
+        lid, cid, str(chat_id), json.dumps(msg_ids), by, special)
+    return lid
 
 
-async def link_result_msg(lid, url, n):
-    kb = InlineKeyboardMarkup([
+async def get_bot_link(cid, lid):
+    row = await pool.fetchrow("SELECT * FROM fb_files WHERE link_id=$1 AND clone_id=$2", lid, cid)
+    return row
+
+
+def link_kb(url):
+    return InlineKeyboardMarkup([
         [InlineKeyboardButton("🔗 SHARE URL", url=f"https://t.me/share/url?url={url}")],
     ])
-    txt = f"✅ <b>Here is your link:</b>\n\n<code>{url}</code>\n\n📦 {n} file(s) stored — permanent!"
-    return txt, kb
-
-# ---------------- delivery ----------------
-
-async def _delete_later(msgs, sec):
-    await asyncio.sleep(sec)
-    for m in msgs:
-        try:
-            await m.delete()
-        except Exception:
-            pass
 
 
-async def check_force_sub(uid):
+# ---------------- force sub ----------------
+
+async def fsub_not_joined(cid, uid, client):
+    """list of fsub rows user ne join nahi kiye"""
+    rows = await pool.fetch("SELECT * FROM fb_fsub WHERE clone_id=$1", cid)
     not_joined = []
-    for ch in FORCE_SUBS:
+    for r in rows:
         try:
-            m = await client.get_chat_member(ch, uid)
+            m = await client.get_chat_member(int(r["chat_id"]) if r["chat_id"].lstrip("-").isdigit()
+                                             else r["chat_id"], uid)
             if m.status in ("left", "kicked"):
-                not_joined.append(ch)
+                not_joined.append(r)
         except Exception:
-            not_joined.append(ch)
-    for ch in FORCE_IDS:
-        try:
-            m = await client.get_chat_member(ch, uid)
-            if m.status in ("left", "kicked"):
-                not_joined.append(ch)
-        except Exception:
-            not_joined.append(ch)
+            not_joined.append(r)
     return not_joined
 
 
-async def deliver(uid, link_id):
-    row = await pool.fetchrow("SELECT * FROM fs_files WHERE link_id=$1", link_id)
+async def join_buttons(cid, uid, client, lid):
+    rows = await fsub_not_joined(cid, uid, client)
+    if not rows:
+        return None
+    kb = []
+    for r in rows:
+        link = r["link"]
+        title = r["title"] or "Channel"
+        if not link:
+            # link regenerate karne ki koshish
+            try:
+                link = await client.export_chat_invite_link(
+                    int(r["chat_id"]) if r["chat_id"].lstrip("-").isdigit() else r["chat_id"])
+                await pool.execute("UPDATE fb_fsub SET link=$1 WHERE clone_id=$2 AND chat_id=$3",
+                                  link, cid, r["chat_id"])
+            except Exception:
+                link = None
+        if link:
+            kb.append([InlineKeyboardButton(f"📢 Join — {title}", url=link)])
+        else:
+            kb.append([InlineKeyboardButton(f"⚠️ {title} (link missing)", callback_data="noop")])
+    kb.append([InlineKeyboardButton("✅ TRY AGAIN", callback_data=f"try:{lid}")])
+    return InlineKeyboardMarkup(kb)
+
+
+# ---------------- delivery ----------------
+
+async def _delete_later(client, msgs, sec):
+    await asyncio.sleep(sec)
+    for m in msgs:
+        try:
+            await client.delete_messages(m.chat.id, m.id)
+        except Exception:
+            pass
+
+
+async def deliver(cid, uid, lid, client):
+    row = await get_bot_link(cid, lid)
     if not row:
         await client.send_message(uid, "❌ Link invalid hai ya delete ho chuka.")
         return
-    not_joined = await check_force_sub(uid)
-    if not_joined:
-        rows = []
-        for i, ch in enumerate(not_joined):
-            uname = ch.lstrip("@") if isinstance(ch, str) else str(ch)
-            rows.append([InlineKeyboardButton(f"📢 Join Channel {i + 1}", url=f"https://t.me/{uname}")])
-        rows.append([InlineKeyboardButton("✅ Joined — Try Again", callback_data=f"retry:{link_id}")])
+    kb = await join_buttons(cid, uid, client, lid)
+    if kb:
         await client.send_message(
-            uid, "🔒 <b>Pehle channel(s) join karo, phir file milegi!</b>",
-            reply_markup=InlineKeyboardMarkup(rows))
+            uid, "🔒 <b>Pehle channel(s) join karo — phir TRY AGAIN dabao!</b>", reply_markup=kb)
         return
+    clone = await load_clone(cid)
+    ad = clone["auto_delete"] if clone else 0
     msg_ids = json.loads(row["msg_ids"])
     sent = []
-    for i, mid in enumerate(msg_ids):
-        try:
-            cap = None
-            if i == 0 and CUSTOM_CAPTION:
-                cap = CUSTOM_CAPTION
-            kb = btn_kb() if i == 0 else None
-            m = await client.copy_message(
-                chat_id=uid, from_chat_id=row["chat_id"], message_id=mid,
-                caption=cap, reply_markup=kb)
-            sent.append(m)
-        except FloodWait as e:
-            await asyncio.sleep(min(int(e.value), 20))
+    for mid in msg_ids:
+        for attempt in range(2):
             try:
                 m = await client.copy_message(
-                    chat_id=uid, from_chat_id=row["chat_id"], message_id=mid,
-                    caption=cap if i == 0 else None, reply_markup=btn_kb() if i == 0 else None)
+                    chat_id=uid, from_chat_id=chat_ref(row["chat_id"]), message_id=mid)
                 sent.append(m)
-            except Exception:
-                pass
-        except Exception as e:
-            print(f"[filebot] deliver fail mid={mid}: {str(e)[:80]}")
-    if AUTO_DELETE and sent:
-        asyncio.create_task(_delete_later(sent, AUTO_DELETE))
+                break
+            except FloodWait as e:
+                await asyncio.sleep(min(int(e.value), 20))
+            except Exception as e:
+                print(f"[filebot] deliver fail {mid}: {str(e)[:80]}")
+                break
+    if ad and sent:
+        asyncio.create_task(_delete_later(client, sent, ad))
 
-# ---------------- handlers ----------------
 
-async def on_message(_, m):
-    global bot_me
+# =========================================================
+#                    MAIN BOT (clone factory)
+# =========================================================
+
+async def main_on_message(_, m):
     try:
         uid = m.from_user.id if m.from_user else 0
         name = (m.from_user.first_name if m.from_user else "friend") or "friend"
-        text = (m.text or m.caption or "").strip()
     except Exception:
         return
+    text = (m.text or m.caption or "").strip()
 
-    # user-track
-    try:
-        await pool.execute(
-            "INSERT INTO fs_users (user_id, name) VALUES ($1,$2) ON CONFLICT (user_id) DO NOTHING",
-            uid, name)
-    except Exception:
-        pass
-
-    # banned?
-    try:
-        if await pool.fetchval("SELECT 1 FROM fs_banned WHERE user_id=$1", uid):
-            return
-    except Exception:
-        pass
-
-    # ----- /start -----
     if text.startswith("/start"):
-        parts = text.split(maxsplit=1)
-        if len(parts) > 1 and parts[1].strip():
-            await deliver(uid, parts[1].strip())
-        else:
-            await m.reply(WELCOME.format(name=name), reply_markup=main_kb())
+        states.pop(sk(uid), None)
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🤖 CREATE MY OWN CLONE", callback_data="manage")],
+            [InlineKeyboardButton("📂 MY CLONES", callback_data="manage"),
+             InlineKeyboardButton("📢 UPDATE CHANNEL", url=UPDATE_LINK)],
+        ])
+        await m.reply(MAIN_WELCOME.format(name=name), reply_markup=kb, disable_web_page_preview=True)
         return
 
-    if text.startswith("/id"):
-        await m.reply(f"🆔 Tumhara ID: <code>{uid}</code>")
-        return
-
-    if text.startswith("/help"):
-        await m.reply(HELP_TEXT, reply_markup=main_kb())
+    if text.startswith("/menu") or text.startswith("/help"):
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🤖 CREATE MY OWN CLONE", callback_data="manage")],
+            [InlineKeyboardButton("📂 MY CLONES", callback_data="manage")],
+        ])
+        await m.reply("🤖 <b>MAIN BOT Menu</b>\n\nMain sirf <b>CLONES</b> banata hoon!\n"
+                      "Neeche button se apna file store bot banao (max 6).", reply_markup=kb)
         return
 
     if text.startswith("/about"):
-        await m.reply(ABOUT_TEXT.format(bot="@" + bot_me.username if bot_me else "FileStore"),
-                      reply_markup=main_kb())
+        await m.reply(
+            f"✨ ᴀʙᴏᴜᴛ ᴍᴇ\n\n✰ ᴍʏ ɴᴀᴍᴇ: {main_me.first_name if main_me else 'AnimeFlix File Store'}\n"
+            f"✰ ᴍʏ ᴏᴡɴᴇʀ: <a href='tg://user?id={SUPER_OWNER}'>Lovely anime</a>\n"
+            f"✰ ᴜᴘᴅᴀᴛᴇs: <a href='{UPDATE_LINK}'>Update Channel</a>\n"
+            f"✰ ᴄᴏɴᴛᴀᴄᴛ ꜰᴏʀ ʙᴏᴛ ᴅᴇᴠᴇʟᴏᴘɪɴɢ: <a href='tg://user?id={SUPER_OWNER}'>AnimeFlix</a>")
         return
 
-    # ----- owner/admin commands -----
-    if text.startswith("/stats"):
-        if not is_mod(uid):
-            return await m.reply("❌ Owner only")
-        users = await pool.fetchval("SELECT count(*) FROM fs_users")
-        files = await pool.fetchval("SELECT count(*) FROM fs_files")
-        await m.reply(f"📊 <b>Stats</b>\n👥 Users: {users}\n📦 Links: {files}")
+    st = states.get(sk(uid))
+    if not st:
         return
 
-    if text.startswith("/ban") or text.startswith("/unban"):
-        if not is_mod(uid):
-            return await m.reply("❌ Owner only")
-        ban = text.startswith("/ban")
-        target = None
-        parts = text.split()
-        if len(parts) > 1 and parts[1].lstrip("-").isdigit():
-            target = int(parts[1])
-        elif m.reply_to_message and m.reply_to_message.from_user:
-            target = m.reply_to_message.from_user.id
-        if not target:
-            return await m.reply("Usage: /ban 123456789 (ya kisi message pe reply)")
-        if ban:
-            await pool.execute("INSERT INTO fs_banned (user_id) VALUES ($1) ON CONFLICT DO NOTHING", target)
-            await m.reply(f"🚫 Banned: <code>{target}</code>")
+    # ---- token receive ----
+    if st.get("flow") == "token":
+        states.pop(sk(uid), None)
+        tok = text.strip()
+        if not re.match(r"^\d{6,}:[A-Za-z0-9_-]{30,}$", tok):
+            await m.reply("❌ Ye token sahi nahi lag raha. @BotFather se jo token aaya wahi bhejo.")
+            return
+        cnt = await pool.fetchval("SELECT count(*) FROM fb_clones WHERE owner_id=$1", uid)
+        if cnt >= MAX_CLONES_PER_USER:
+            await m.reply(f"⚠️ Tumhare already {cnt} clones hain — max {MAX_CLONES_PER_USER} allowed!")
+            return
+        total = await pool.fetchval("SELECT count(*) FROM fb_clones WHERE active=true")
+        if total >= MAX_TOTAL:
+            await m.reply("⚠️ Server full hai — thodi der baad try karo.")
+            return
+        if await pool.fetchval("SELECT 1 FROM fb_clones WHERE token=$1", tok):
+            await m.reply("❌ Ye token pehle se kisi clone me use ho raha hai.")
+            return
+        status = await m.reply("⏳ Bot check ho raha hai...")
+        try:
+            c = Client(f"clone_{secrets.token_hex(4)}", api_id=API_ID, api_hash=API_HASH,
+                       bot_token=tok, in_memory=True)
+            await c.start()
+            me = await c.get_me()
+            await c.stop()
+        except Exception as e:
+            await status.edit_text(f"❌ Token kaam nahi kar raha: {str(e)[:120]}")
+            return
+        row = await pool.fetchrow(
+            "INSERT INTO fb_clones (owner_id, owner_name, token, bot_username) "
+            "VALUES ($1,$2,$3,$4) RETURNING *", uid, name, tok, me.username)
+        ok = await boot_clone(dict(row))
+        if not ok:
+            await status.edit_text("⚠️ Token theek hai par bot abhi start nahi ho paya — thodi der baad /start karke Manage kholo.")
+            return
+        await status.edit_text(
+            f"🎉 <b>CLONE READY!</b>\n\n👤 Owner: {name}\n🤖 Bot: @{me.username}\n\n"
+            f"Ab us bot ko kholo: <a href='https://t.me/{me.username}'>@{me.username}</a> — /start bhejo!\n"
+            f"Settings ke liye yahan <b>MY CLONES</b> kholo.",
+            reply_markup=InlineKeyboardMarkup(
+                [[InlineKeyboardButton("📂 MY CLONES", callback_data="manage")]]))
+        return
+
+    # ---- start msg text ----
+    if st.get("flow") == "startmsg":
+        cid = st["cid"]
+        states.pop(sk(uid), None)
+        await pool.execute("UPDATE fb_clones SET start_msg=$1 WHERE id=$2", text, cid)
+        await m.reply("✅ Start message save ho gaya!")
+        return
+
+    # ---- start photo ----
+    if st.get("flow") == "startphoto":
+        cid = st["cid"]
+        states.pop(sk(uid), None)
+        if m.photo:
+            await pool.execute("UPDATE fb_clones SET start_photo=$1 WHERE id=$2",
+                               m.photo.file_id, cid)
+            await m.reply("✅ Start photo save ho gayi!")
         else:
-            await pool.execute("DELETE FROM fs_banned WHERE user_id=$1", target)
-            await m.reply(f"✅ Unbanned: <code>{target}</code>")
+            await m.reply("❌ Photo nahi mili — dobara try karo.")
         return
 
-    if text.startswith("/broadcast"):
-        if not is_mod(uid):
-            return await m.reply("❌ Owner only")
-        r = m.reply_to_message
-        if not r:
-            return await m.reply("📢 Kisi message pe <b>reply</b> karke /broadcast bhejo.")
-        ids = [row["user_id"] for row in await pool.fetch("SELECT user_id FROM fs_users")]
-        ok = blk = fail = 0
-        status = await m.reply(f"⏳ Broadcast chalu... 0/{len(ids)}")
-        for i, t_uid in enumerate(ids):
+    # ---- fsub manual link fallback ----
+    if st.get("flow") == "fsublink":
+        cid, chat_id, jr = st["cid"], st["chat_id"], st.get("jr", False)
+        states.pop(sk(uid), None)
+        link = text.strip()
+        if not link.startswith("https://t.me/"):
+            await m.reply("❌ Link https://t.me/... se shuru hona chahiye. Dobara Add Channel karo.")
+            return
+        await pool.execute(
+            "INSERT INTO fb_fsub (clone_id, chat_id, title, link, join_request) "
+            "VALUES ($1,$2,$3,$4,$5) ON CONFLICT (clone_id, chat_id) DO UPDATE SET link=$4",
+            cid, str(chat_id), st.get("title") or "Channel", link, jr)
+        await m.reply("✅ Force-sub channel add ho gaya!")
+        return
+
+    # ---- moderator add ----
+    if st.get("flow") == "modadd":
+        cid = st["cid"]
+        states.pop(sk(uid), None)
+        mid = text.split()[0] if text.split() else ""
+        if not mid.lstrip("-").isdigit():
+            await m.reply("❌ Sirf numeric ID bhejo (/id se milega).")
+            return
+        await pool.execute("INSERT INTO fb_mods (clone_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING",
+                           cid, int(mid))
+        await m.reply(f"✅ Moderator add: <code>{mid}</code>")
+        return
+
+    # ---- auto delete ----
+    if st.get("flow") == "autodel":
+        cid = st["cid"]
+        states.pop(sk(uid), None)
+        if not text.isdigit():
+            await m.reply("❌ Sirf number (seconds) bhejo — 0 = off")
+            return
+        await pool.execute("UPDATE fb_clones SET auto_delete=$1 WHERE id=$2", int(text), cid)
+        await m.reply(f"✅ Auto-delete: {int(text)} sec" if int(text) else "✅ Auto-delete OFF")
+        return
+
+
+def clone_menu_kb(cid, clone):
+    rows = [
+        [InlineKeyboardButton("💬 START MSG", callback_data=f"cfg:msg:{cid}"),
+         InlineKeyboardButton("🔒 FORCE SUB", callback_data=f"cfg:fsub:{cid}")],
+        [InlineKeyboardButton("👮 MODERATORS", callback_data=f"cfg:mods:{cid}"),
+         InlineKeyboardButton("⏱ AUTO DELETE", callback_data=f"cfg:ad:{cid}")],
+        [InlineKeyboardButton("📊 STATS", callback_data=f"cfg:stats:{cid}"),
+         InlineKeyboardButton("🗑 DELETE", callback_data=f"cfg:del:{cid}")],
+        [InlineKeyboardButton("🔙 BACK", callback_data="manage")],
+    ]
+    return InlineKeyboardMarkup(rows)
+
+
+async def main_on_callback(_, cq):
+    data = cq.data or ""
+    uid = cq.from_user.id
+    try:
+        if data == "noop":
+            await cq.answer("Link missing — owner ko bolo bot ko admin banaye")
+            return
+        if data == "manage":
+            clones = await pool.fetch("SELECT * FROM fb_clones WHERE owner_id=$1 ORDER BY id", uid)
+            if uid == SUPER_OWNER:
+                clones = await pool.fetch("SELECT * FROM fb_clones ORDER BY id")
+            rows = []
+            for c in clones:
+                rows.append([InlineKeyboardButton(
+                    f"🤖 {c['bot_username'] or ('#' + str(c['id']))}",
+                    callback_data=f"clone:{c['id']}")])
+            if len(clones) < MAX_CLONES_PER_USER:
+                rows.append([InlineKeyboardButton("➕ CREATE NEW CLONE", callback_data="newclone")])
+            rows.append([InlineKeyboardButton("🔙 BACK", callback_data="backhome")])
+            await cq.message.edit_text(
+                f"📂 <b>My Clones</b> ({len(clones)}/{MAX_CLONES_PER_USER})\n"
+                "Clone pe click karke settings kholo:", 
+                reply_markup=InlineKeyboardMarkup(rows))
+            await cq.answer()
+            return
+
+        if data == "newclone":
+            states[sk(uid)] = {"flow": "token"}
+            await cq.message.edit_text(
+                "🤖 <b>CREATE YOUR OWN CLONE</b>\n\n"
+                "1️⃣ @BotFather kholo → /newbot bhejo\n"
+                "2️⃣ Naam aur username set karo\n"
+                "3️⃣ Jo <b>token</b> mile (123456:ABC-xyz... format) —\n"
+                "   ab yahan paste kar do!\n\n"
+                "⏳ Token ka intezaar hai...")
+            await cq.answer()
+            return
+
+        if data == "backhome":
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("🤖 CREATE MY OWN CLONE", callback_data="manage")],
+                [InlineKeyboardButton("📂 MY CLONES", callback_data="manage"),
+                 InlineKeyboardButton("📢 UPDATE CHANNEL", url=UPDATE_LINK)],
+            ])
+            await cq.message.edit_text(MAIN_WELCOME.format(name=cq.from_user.first_name or "friend"),
+                                       reply_markup=kb, disable_web_page_preview=True)
+            await cq.answer()
+            return
+
+        # clone:X
+        if data.startswith("clone:"):
+            cid = int(data.split(":")[1])
+            clone = await load_clone(cid)
+            if not clone or (clone["owner_id"] != uid and uid != SUPER_OWNER):
+                await cq.answer("❌ Ye tumhara clone nahi hai!", show_alert=True)
+                return
+            await cq.message.edit_text(
+                f"🪄 <b>Customize Clone</b>\n"
+                f"➜ Name: @{clone['bot_username']}\n"
+                f"➜ Owner: {clone['owner_name']}\n\n"
+                "Configure Your Clone Settings Using Given Buttons",
+                reply_markup=clone_menu_kb(cid, clone))
+            await cq.answer()
+            return
+
+        # cfg:xxx:cid
+        parts = data.split(":")
+        if parts[0] == "cfg":
+            cid = int(parts[2])
+            clone = await load_clone(cid)
+            if not clone or (clone["owner_id"] != uid and uid != SUPER_OWNER):
+                await cq.answer("❌ Ye tumhara clone nahi hai!", show_alert=True)
+                return
+            what = parts[1]
+
+            if what == "msg":
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("✏️ Edit", callback_data=f"msg:edit:{cid}"),
+                     InlineKeyboardButton("👀 See", callback_data=f"msg:see:{cid}"),
+                     InlineKeyboardButton("♻️ Default", callback_data=f"msg:def:{cid}")],
+                    [InlineKeyboardButton("🖼 PHOTO", callback_data=f"photo:{cid}")],
+                    [InlineKeyboardButton("🔙 BACK", callback_data=f"clone:{cid}")],
+                ])
+                await cq.message.edit_text("💬 <b>Start Message</b>\nApne clone ka welcome text set karo.",
+                                           reply_markup=kb)
+            elif what == "photo":
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("➕ Add", callback_data=f"photo:add:{cid}"),
+                     InlineKeyboardButton("🗑 Delete", callback_data=f"photo:del:{cid}")],
+                    [InlineKeyboardButton("🔙 BACK", callback_data=f"cfg:msg:{cid}")],
+                ])
+                await cq.message.edit_text("🖼 <b>Start Photo</b>\nWelcome message ke saath photo.",
+                                           reply_markup=kb)
+            elif what == "fsub":
+                frows = await pool.fetch("SELECT * FROM fb_fsub WHERE clone_id=$1", cid)
+                kb = []
+                for r in frows:
+                    kb.append([InlineKeyboardButton(
+                        f"❌ {r['title'] or r['chat_id']}" + (" (join-req)" if r["join_request"] else ""),
+                        callback_data=f"fsubdel:{cid}:{r['chat_id'].lstrip('-')}")])
+                if len(frows) < MAX_FSUB:
+                    kb.append([InlineKeyboardButton("➕ ADD CHANNEL", callback_data=f"fsubadd:{cid}")])
+                kb.append([InlineKeyboardButton("🔙 BACK", callback_data=f"clone:{cid}")])
+                await cq.message.edit_text(
+                    f"🔒 <b>Force Sub ({len(frows)}/{MAX_FSUB})</b>\n"
+                    "Users ko file tabhi milegi jab wo ye channels join kare.\n"
+                    "Add karne ke liye bot ko pehle channel me <b>admin</b> banao!",
+                    reply_markup=InlineKeyboardMarkup(kb))
+            elif what == "mods":
+                mrows = await pool.fetch("SELECT user_id FROM fb_mods WHERE clone_id=$1", cid)
+                lst = "\n".join(f"👮 <code>{r['user_id']}</code>" for r in mrows) or "— koi nahi"
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("➕ ADD (ID bhejo)", callback_data=f"modadd:{cid}")],
+                    [InlineKeyboardButton("➖ REMOVE LAST", callback_data=f"moddel:{cid}")],
+                    [InlineKeyboardButton("🔙 BACK", callback_data=f"clone:{cid}")],
+                ])
+                await cq.message.edit_text(f"👮 <b>Moderators</b>\n{lst}\n\n"
+                                           "Moderators ko /genlink /special_link /broadcast ke powers.",
+                                           reply_markup=kb)
+            elif what == "ad":
+                states[sk(uid)] = {"flow": "autodel", "cid": cid}
+                await cq.message.edit_text(
+                    "⏱ <b>Auto Delete</b>\nKitne second baad file auto-delete ho? (0 = off)\n\n"
+                    "Ab number bhejo!")
+            elif what == "stats":
+                users = await pool.fetchval("SELECT count(*) FROM fb_users WHERE clone_id=$1", cid)
+                files = await pool.fetchval("SELECT count(*) FROM fb_files WHERE clone_id=$1", cid)
+                await cq.answer(f"👥 {users} users | 📦 {files} links", show_alert=True)
+                return
+            elif what == "del":
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("⚠️ HAAN, DELETE KARO", callback_data=f"del:yes:{cid}")],
+                    [InlineKeyboardButton("🔙 BACK", callback_data=f"clone:{cid}")],
+                ])
+                await cq.message.edit_text("🗑 <b>Delete Clone?</b>\nYe wapas nahi aayega!", reply_markup=kb)
+            await cq.answer()
+            return
+
+        # msg:edit:def / msg:see
+        if parts[0] == "msg":
+            cid = int(parts[2])
+            if parts[1] == "edit":
+                states[sk(uid)] = {"flow": "startmsg", "cid": cid}
+                await cq.message.edit_text("✏️ Naya start message text bhejo:\n"
+                                           "(placeholders: {name} = user ka naam)")
+            elif parts[1] == "see":
+                clone = await load_clone(cid)
+                await cq.message.reply(clone["start_msg"] or DEFAULT_CLONE_WELCOME)
+            elif parts[1] == "def":
+                await pool.execute("UPDATE fb_clones SET start_msg=NULL WHERE id=$1", cid)
+                await cq.message.edit_text("✅ Default start message set!")
+            await cq.answer()
+            return
+
+        if data.startswith("photo:"):
+            sub = data.split(":")
+            if sub[1] == "add":
+                cid = int(sub[2])
+                states[sk(uid)] = {"flow": "startphoto", "cid": cid}
+                await cq.message.edit_text("🖼 Ab photo bhejo!")
+            elif sub[1] == "del":
+                cid = int(sub[2])
+                await pool.execute("UPDATE fb_clones SET start_photo=NULL WHERE id=$1", cid)
+                await cq.message.edit_text("✅ Photo delete ho gayi!")
+            else:
+                cid = int(sub[1])
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("➕ Add", callback_data=f"photo:add:{cid}"),
+                     InlineKeyboardButton("🗑 Delete", callback_data=f"photo:del:{cid}")],
+                    [InlineKeyboardButton("🔙 BACK", callback_data=f"cfg:msg:{cid}")],
+                ])
+                await cq.message.edit_text("🖼 <b>Start Photo</b>\nWelcome message ke saath photo.",
+                                           reply_markup=kb)
+            await cq.answer()
+            return
+
+        # fsubadd:cid → clone bot ke admin chats dikhao
+        if data.startswith("fsubadd:"):
+            cid = int(data.split(":")[1])
+            bot_client = clone_clients.get(cid)
+            if not bot_client:
+                await cq.answer("Bot offline!", show_alert=True)
+                return
+            chats = []
+            async for d in bot_client.get_dialogs(limit=50):
+                chat = d.chat
+                if chat.type in ("channel", "supergroup") and chat.id:
+                    try:
+                        member = await bot_client.get_chat_member(chat.id, "me")
+                        if member.status in ("administrator", "creator"):
+                            chats.append(chat)
+                    except Exception:
+                        pass
+            if not chats:
+                await cq.answer("Koi admin channel nahi mila! Bot ko pehle channel me admin banao.",
+                                show_alert=True)
+                return
+            kb = [[InlineKeyboardButton(f"➕ {c.title or c.id}", callback_data=f"fsubpick:{cid}:{c.id}")]
+                  for c in chats[:15]]
+            kb.append([InlineKeyboardButton("🔙 BACK", callback_data=f"cfg:fsub:{cid}")])
+            await cq.message.edit_text("📢 Bot jis channel me admin hai — chuno:",
+                                       reply_markup=InlineKeyboardMarkup(kb))
+            await cq.answer()
+            return
+
+        # fsubpick:cid:chatid → invite link banao + mode poochho (private ho to)
+        if data.startswith("fsubpick:"):
+            _, cids, chatid = data.split(":")
+            cid = int(cids)
+            bot_client = clone_clients.get(cid)
+            if not bot_client:
+                await cq.answer("Bot offline!", show_alert=True)
+                return
+            cid_int = int(chatid)
             try:
-                await r.copy(t_uid)
-                ok += 1
-            except (UserIsBlocked, InputUserDeactivated):
-                blk += 1
-            except FloodWait as e:
-                await asyncio.sleep(min(int(e.value), 15))
-                try:
-                    await r.copy(t_uid)
-                    ok += 1
-                except Exception:
-                    fail += 1
+                chat = await bot_client.get_chat(cid_int)
             except Exception:
-                fail += 1
-            if i and i % 20 == 0:
+                await cq.answer("Channel info nahi mila", show_alert=True)
+                return
+            link = None
+            try:
+                link = await bot_client.export_chat_invite_link(cid_int)
+            except Exception:
+                pass
+            is_private = getattr(chat, "username", None) is None
+            if is_private:
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📨 JOIN REQUEST MODE", callback_data=f"fsubmode:{cid}:{chatid}:1")],
+                    [InlineKeyboardButton("🔓 NORMAL MODE", callback_data=f"fsubmode:{cid}:{chatid}:0")],
+                ])
+                extra = ""
+                if link:
+                    extra = f"\n\n🔗 Bot ka banaya link: <code>{link}</code>"
+                await cq.message.edit_text(
+                    "Ye PRIVATE channel hai — mode chuno:\n\n"
+                    "📨 <b>Join Request</b>: users request bhejenge, tum approve karoge\n"
+                    "🔓 <b>Normal</b>: seedha join ho jayenge" + extra, reply_markup=kb)
+            else:
+                uname_link = f"https://t.me/{chat.username}"
+                await pool.execute(
+                    "INSERT INTO fb_fsub (clone_id, chat_id, title, link, join_request) "
+                    "VALUES ($1,$2,$3,$4,false) ON CONFLICT (clone_id, chat_id) DO NOTHING",
+                    cid, str(cid_int), chat.title or "Channel", uname_link)
+                await cq.message.edit_text(
+                    f"✅ Force-sub add: {chat.title}\n🔗 {uname_link}")
+            await cq.answer()
+            return
+
+        # fsubmode:cid:chatid:0/1
+        if data.startswith("fsubmode:"):
+            _, cids, chatid, mode = data.split(":")
+            cid, cid_int, jr = int(cids), int(chatid), mode == "1"
+            bot_client = clone_clients.get(cid)
+            link = None
+            if bot_client:
                 try:
-                    await status.edit_text(f"⏳ Broadcast... {i + 1}/{len(ids)} | ✅ {ok} ❌ {fail}")
+                    link = await bot_client.export_chat_invite_link(cid_int)
                 except Exception:
                     pass
-            await asyncio.sleep(0.05)
-        await m.reply(
-            f"📢 <b>Broadcast done</b>\n👥 Total: {len(ids)}\n✅ OK: {ok}\n🚫 Blocked: {blk}\n❌ Fail: {fail}")
-        return
-
-    # ----- /genlink -----
-    if text.startswith("/genlink"):
-        if not is_mod(uid):
-            return await m.reply("❌ Moderators only")
-        r = m.reply_to_message
-        if r:
-            chat_id, mid = r.chat.id, r.id
-            # storage channel me copy karke permanent banao
-            if STORAGE_CHANNEL.lstrip("-").isdigit():
-                try:
-                    cp = await client.copy_message(
-                        chat_id=int(STORAGE_CHANNEL), from_chat_id=chat_id, message_id=mid)
-                    chat_id, mid = int(STORAGE_CHANNEL), cp.id
-                except Exception as e:
-                    print(f"[filebot] storage copy fail: {str(e)[:80]}")
-            lid, url = await make_link(chat_id, [mid], uid)
-            txt, kb = await link_result_msg(lid, url, 1)
-            await m.reply(txt, reply_markup=kb, disable_web_page_preview=True)
-            return
-        # link argument?
-        parts = text.split()
-        if len(parts) > 1:
-            chat_id, mid = parse_tme_link(parts[1])
-            if chat_id:
-                lid, url = await make_link(chat_id, [mid], uid)
-                txt, kb = await link_result_msg(lid, url, 1)
-                await m.reply(txt, reply_markup=kb, disable_web_page_preview=True)
+            if not link:
+                states[sk(uid)] = {"flow": "fsublink", "cid": cid, "chat_id": str(cid_int), "jr": jr}
+                await cq.message.edit_text(
+                    "⚠️ Bot invite link nahi bana paya (admin permission missing).\n"
+                    "Channel ka invite link paste karo (https://t.me/+... wala):")
+                await cq.answer()
                 return
-        await m.reply("💡 File bhejo ya kisi message pe reply karke /genlink likho.")
-        return
-
-    # ----- /batch -----
-    if text.startswith("/batch"):
-        if not is_mod(uid):
-            return await m.reply("❌ Moderators only")
-        parts = text.split()
-        if len(parts) < 3:
-            return await m.reply(
-                "Usage: <code>/batch https://t.me/c/xxx/10 https://t.me/c/xxx/50</code>\n"
-                "(pehli aur aakhri message ke links — beech ki sab ek link me aa jayengi)")
-        c1, s = parse_tme_link(parts[1])
-        c2, e = parse_tme_link(parts[2])
-        if not c1 or not c2 or c1 != c2 or e < s:
-            return await m.reply("❌ Dono links same channel ke hone chahiye (pehla chhota number, doosra bada)")
-        if e - s > 300:
-            return await m.reply("❌ Max 300 messages ek link me")
-        msg_ids = list(range(s, e + 1))
-        lid, url = await make_link(c1, msg_ids, uid)
-        txt, kb = await link_result_msg(lid, url, len(msg_ids))
-        await m.reply(txt, reply_markup=kb, disable_web_page_preview=True)
-        return
-
-    # ----- moderator ne seedha file bheji → auto-link! -----
-    if is_mod(uid) and (m.video or m.document or m.audio or m.photo or m.animation):
-        chat_id, mid = m.chat.id, m.id
-        if STORAGE_CHANNEL.lstrip("-").isdigit():
-            try:
-                cp = await client.copy_message(
-                    chat_id=int(STORAGE_CHANNEL), from_chat_id=chat_id, message_id=mid)
-                chat_id, mid = int(STORAGE_CHANNEL), cp.id
-            except Exception as e:
-                print(f"[filebot] storage copy fail: {str(e)[:80]}")
-        lid, url = await make_link(chat_id, [mid], uid)
-        txt, kb = await link_result_msg(lid, url, 1)
-        await m.reply(txt, reply_markup=kb, disable_web_page_preview=True)
-        return
-
-    # default replies
-    if is_mod(uid):
-        await m.reply("💡 File bhejo — link khud ban jayega! Ya /help likho.")
-    else:
-        await m.reply(WELCOME.format(name=name), reply_markup=main_kb())
-
-
-async def on_callback(_, cq):
-    data = cq.data or ""
-    try:
-        if data == "help":
-            await cq.message.edit_text(HELP_TEXT, reply_markup=main_kb())
-        elif data == "about":
-            await cq.message.edit_text(
-                ABOUT_TEXT.format(bot="@" + bot_me.username if bot_me else "FileStore"),
-                reply_markup=main_kb())
-        elif data.startswith("retry:"):
+            await pool.execute(
+                "INSERT INTO fb_fsub (clone_id, chat_id, title, link, join_request) "
+                "VALUES ($1,$2,$3,$4,$5) ON CONFLICT (clone_id, chat_id) DO NOTHING",
+                cid, str(cid_int), "Channel", link, jr)
+            await cq.message.edit_text(f"✅ Force-sub add ho gaya! (mode: {'join-request' if jr else 'normal'})\n🔗 <code>{link}</code>")
             await cq.answer()
-            await deliver(cq.from_user.id, data.split(":", 1)[1])
             return
-        else:
+
+        # fsubdel:cid:chatid
+        if data.startswith("fsubdel:"):
+            parts2 = data.split(":")
+            cid = int(parts2[1])
+            chat_id = "-" + parts2[2] if not parts2[2].isdigit() else parts2[2]
+            await pool.execute("DELETE FROM fb_fsub WHERE clone_id=$1 AND chat_id LIKE $2",
+                               cid, "%" + parts2[2])
+            await cq.answer("❌ Remove ho gaya")
+            await cq.message.edit_text("🗑 Remove ho gaya! Refresh: /start se MY CLONES kholo.")
+            return
+
+        if data.startswith("modadd:"):
+            cid = int(data.split(":")[1])
+            states[sk(uid)] = {"flow": "modadd", "cid": cid}
+            await cq.message.edit_text("👮 Moderator ka numeric ID bhejo:\n(user ko @userinfobot se /id karke milega)")
             await cq.answer()
-    except Exception:
+            return
+
+        if data.startswith("moddel:"):
+            cid = int(data.split(":")[1])
+            await pool.execute(
+                "DELETE FROM fb_mods WHERE ctid IN (SELECT ctid FROM fb_mods WHERE clone_id=$1 "
+                "ORDER BY user_id DESC LIMIT 1)", cid)
+            await cq.answer("➖ Last moderator removed")
+            return
+
+        if data.startswith("del:yes:"):
+            cid = int(data.split(":")[2])
+            c = clone_clients.pop(cid, None)
+            if c:
+                try:
+                    await c.stop()
+                except Exception:
+                    pass
+            await pool.execute("UPDATE fb_clones SET active=false WHERE id=$1", cid)
+            await pool.execute("DELETE FROM fb_fsub WHERE clone_id=$1", cid)
+            await pool.execute("DELETE FROM fb_mods WHERE clone_id=$1", cid)
+            await cq.message.edit_text("🗑 Clone delete ho gaya. 📂 MY CLONES se bacha hua dekho.")
+            await cq.answer()
+            return
+
+        await cq.answer()
+    except Exception as e:
+        print(f"[filebot] main cb err: {str(e)[:100]}")
         try:
             await cq.answer()
         except Exception:
             pass
-        return
-    try:
-        await cq.answer()
-    except Exception:
-        pass
 
-# ---------------- lifecycle ----------------
+
+# =========================================================
+#                    CLONE BOT handlers
+# =========================================================
+
+def make_clone_handlers(cid):
+    async def on_message(_, m):
+        try:
+            uid = m.from_user.id if m.from_user else 0
+            name = (m.from_user.first_name if m.from_user else "friend") or "friend"
+        except Exception:
+            return
+        text = (m.text or m.caption or "").strip()
+        clone = await load_clone(cid)
+        if not clone or not clone["active"]:
+            return
+        mod = is_clone_mod(clone, uid)
+        try:
+            await pool.execute(
+                "INSERT INTO fb_users (clone_id, user_id, name) VALUES ($1,$2,$3) "
+                "ON CONFLICT (clone_id, user_id) DO NOTHING", cid, uid, name)
+        except Exception:
+            pass
+        try:
+            if await pool.fetchval("SELECT 1 FROM fb_banned WHERE clone_id=$1 AND user_id=$2", cid, uid):
+                return
+        except Exception:
+            pass
+        if text.startswith("/start"):
+            parts = text.split(maxsplit=1)
+            if len(parts) > 1 and parts[1].strip():
+                await deliver(cid, uid, parts[1].strip().split()[0], _)
+                return
+            welcome = clone["start_msg"] or DEFAULT_CLONE_WELCOME
+            kb = clone_welcome_kb()
+            if clone["start_photo"]:
+                await _.send_photo(uid, clone["start_photo"], caption=welcome.format(name=name),
+                                   reply_markup=kb)
+            else:
+                await _.send_message(uid, welcome.format(name=name), reply_markup=kb)
+            return
+
+        if text.startswith("/menu") or text.startswith("/help"):
+            await _.send_message(uid, CLONE_HELP)
+            return
+
+        if text.startswith("/about"):
+            await _.send_message(
+                uid, about_text(clone, f"@{clone['bot_username']}" if clone["bot_username"] else "File Store Bot"),
+                disable_web_page_preview=True)
+            return
+
+        if text.startswith("/id"):
+            await _.send_message(uid, f"🆔 Tumhara ID: <code>{uid}</code>")
+            return
+
+        if text.startswith("/stats"):
+            if not mod:
+                return
+            users = await pool.fetchval("SELECT count(*) FROM fb_users WHERE clone_id=$1", cid)
+            files = await pool.fetchval("SELECT count(*) FROM fb_files WHERE clone_id=$1", cid)
+            await _.send_message(uid, f"📊 <b>Stats</b>\n👥 Users: {users}\n📦 Links: {files}")
+            return
+
+        if text.startswith("/ban") or text.startswith("/unban"):
+            if not mod:
+                return
+            ban = text.startswith("/ban")
+            parts = text.split()
+            target = None
+            if len(parts) > 1 and parts[1].lstrip("-").isdigit():
+                target = int(parts[1])
+            elif m.reply_to_message and m.reply_to_message.from_user:
+                target = m.reply_to_message.from_user.id
+            if not target:
+                await _.send_message(uid, "Usage: /ban 123456789 (ya reply)")
+                return
+            if ban:
+                await pool.execute("INSERT INTO fb_banned (clone_id, user_id) VALUES ($1,$2) ON CONFLICT DO NOTHING", cid, target)
+                await _.send_message(uid, f"🚫 Banned: <code>{target}</code>")
+            else:
+                await pool.execute("DELETE FROM fb_banned WHERE clone_id=$1 AND user_id=$2", cid, target)
+                await _.send_message(uid, f"✅ Unbanned: <code>{target}</code>")
+            return
+
+        if text.startswith("/broadcast"):
+            if not mod:
+                return
+            r = m.reply_to_message
+            if not r:
+                await _.send_message(uid, "📢 Kisi message pe reply karke /broadcast bhejo.")
+                return
+            ids = [row["user_id"] for row in await pool.fetch(
+                "SELECT user_id FROM fb_users WHERE clone_id=$1", cid)]
+            ok = blk = fail = 0
+            status = await _.send_message(uid, f"⏳ Broadcast... 0/{len(ids)}")
+            for i, t_uid in enumerate(ids):
+                try:
+                    await r.copy(t_uid)
+                    ok += 1
+                except (UserIsBlocked, InputUserDeactivated):
+                    blk += 1
+                except FloodWait as e:
+                    await asyncio.sleep(min(int(e.value), 15))
+                    try:
+                        await r.copy(t_uid)
+                        ok += 1
+                    except Exception:
+                        fail += 1
+                except Exception:
+                    fail += 1
+                if i and i % 20 == 0:
+                    try:
+                        await status.edit_text(f"⏳ {i + 1}/{len(ids)} | ✅ {ok} ❌ {fail}")
+                    except Exception:
+                        pass
+                await asyncio.sleep(0.05)
+            await _.send_message(
+                uid, f"📢 <b>Broadcast done</b>\n👥 Total: {len(ids)}\n✅ {ok}\n🚫 {blk}\n❌ {fail}")
+            return
+
+        if text.startswith("/genlink"):
+            if not mod:
+                return
+            r = m.reply_to_message
+            if r:
+                lid = await make_link(cid, str(r.chat.id), [r.id], uid)
+                url = f"https://t.me/{clone['bot_username']}?start={lid}"
+                await _.send_message(
+                    uid, f"✅ <b>Here is your link:</b>\n\n<code>{url}</code>",
+                    reply_markup=link_kb(url), disable_web_page_preview=True)
+            else:
+                states[sk(uid, cid)] = {"flow": "genlink"}
+                await _.send_message(
+                    uid, "📤 Ab file/message bhejo — link bana dunga. (/cancel se ruko)")
+            return
+
+        if text.startswith("/special_link"):
+            if not mod:
+                return
+            states[sk(uid, cid)] = {"flow": "special", "msg_ids": []}
+            await _.send_message(
+                uid, "📥 <b>SPECIAL LINK</b>\n\nJitni files bhejni hain bhejo — "
+                "jab sab bhej chho to <b>/done</b> likho.\n❌ Cancel: /cancel")
+            return
+
+        if text.startswith("/batch"):
+            if not mod:
+                return
+            parts = text.split()
+            if len(parts) < 3:
+                await _.send_message(
+                    uid, "Usage: <code>/batch https://t.me/c/xxx/10 https://t.me/c/xxx/50</code>")
+                return
+            c1, s = parse_tme_link(parts[1])
+            c2, e = parse_tme_link(parts[2])
+            if not c1 or not c2 or c1 != c2 or e < s:
+                await _.send_message(uid, "❌ Dono links same channel ke + pehla chhota number")
+                return
+            if e - s > 300:
+                await _.send_message(uid, "❌ Max 300 messages")
+                return
+            lid = await make_link(cid, str(c1), list(range(s, e + 1)), uid)
+            url = f"https://t.me/{clone['bot_username']}?start={lid}"
+            await _.send_message(
+                uid, f"✅ <b>Link ready</b> ({e - s + 1} files):\n\n<code>{url}</code>",
+                reply_markup=link_kb(url), disable_web_page_preview=True)
+            return
+
+        if text.startswith("/cancel"):
+            states.pop(sk(uid, cid), None)
+            await _.send_message(uid, "❌ Cancel ho gaya.")
+            return
+
+        if text.startswith("/done"):
+            st = states.get(sk(uid, cid))
+            if st and st.get("flow") == "special":
+                if not st["msg_ids"]:
+                    await _.send_message(uid, "❌ Pehle kuch files bhejo!")
+                    return
+                lid = await make_link(cid, str(m.chat.id), st["msg_ids"], uid, special=True)
+                states.pop(sk(uid, cid), None)
+                url = f"https://t.me/{clone['bot_username']}?start={lid}"
+                await _.send_message(
+                    uid, f"✅ <b>Special link ready</b> ({len(st['msg_ids'])} files):\n\n<code>{url}</code>",
+                    reply_markup=InlineKeyboardMarkup([
+                        [InlineKeyboardButton("✏️ MODIFY LINK", callback_data=f"mod:{lid}")],
+                        [InlineKeyboardButton("🔗 SHARE URL", url=f"https://t.me/share/url?url={url}")],
+                    ]), disable_web_page_preview=True)
+            return
+
+        # ---- state-based file collection ----
+        st = states.get(sk(uid, cid))
+        if st:
+            has_media = m.video or m.document or m.audio or m.photo or m.animation
+            if st.get("flow") == "genlink":
+                if has_media:
+                    lid = await make_link(cid, str(m.chat.id), [m.id], uid)
+                    states.pop(sk(uid, cid), None)
+                    url = f"https://t.me/{clone['bot_username']}?start={lid}"
+                    await _.send_message(
+                        uid, f"✅ <b>Here is your link:</b>\n\n<code>{url}</code>",
+                        reply_markup=link_kb(url), disable_web_page_preview=True)
+                return
+            if st.get("flow") == "special":
+                if has_media or m.reply_to_message:
+                    mid = m.reply_to_message.id if m.reply_to_message else m.id
+                    chat = m.reply_to_message.chat.id if m.reply_to_message else m.chat.id
+                    st["msg_ids"].append(mid)
+                    await _.send_message(uid, f"➕ Added ({len(st['msg_ids'])}) — /done se khatam karo")
+                return
+            if st.get("flow") == "sp_add":
+                if has_media:
+                    row = await get_bot_link(cid, st["link_id"])
+                    if row:
+                        ids = json.loads(row["msg_ids"])
+                        ids.append(m.id)
+                        await pool.execute("UPDATE fb_files SET msg_ids=$1 WHERE link_id=$2",
+                                           json.dumps(ids), st["link_id"])
+                        await _.send_message(uid, f"✅ Added ({len(ids)} total) — /done ya aur bhejo")
+                return
+        # NO auto response on plain files/text — sirf command ke baad (owner ka order!)
+        return
+
+    async def on_callback(_, cq):
+        data = cq.data or ""
+        uid = cq.from_user.id
+        clone = await load_clone(cid)
+        if not clone:
+            return
+        mod = is_clone_mod(clone, uid)
+        try:
+            if data in ("help",):
+                await cq.message.edit_text(CLONE_HELP, reply_markup=clone_welcome_kb())
+            elif data == "about":
+                await cq.message.edit_text(
+                    about_text(clone, f"@{clone['bot_username']}" if clone['bot_username'] else "Bot"),
+                    reply_markup=clone_welcome_kb(), disable_web_page_preview=True)
+            elif data.startswith("try:"):
+                lid = data.split(":", 1)[1]
+                await deliver(cid, uid, lid, _)
+            elif data.startswith("mod:") and mod:
+                lid = data.split(":", 1)[1]
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("🗑 DELETE LINK", callback_data=f"mdl:{lid}")],
+                    [InlineKeyboardButton("✏️ EDIT CONTENT", callback_data=f"med:{lid}")],
+                    [InlineKeyboardButton("❌ CANCEL", callback_data="noop")],
+                    [InlineKeyboardButton("🔒 CLOSE", callback_data="close")],
+                ])
+                await cq.message.edit_text("✏️ <b>Modify Link</b>\nKya karna hai?", reply_markup=kb)
+            elif data.startswith("mdl:") and mod:
+                lid = data.split(":", 1)[1]
+                await pool.execute("DELETE FROM fb_files WHERE link_id=$1", lid)
+                await cq.message.edit_text("🗑 Link delete ho gaya!")
+            elif data.startswith("med:") and mod:
+                lid = data.split(":", 1)[1]
+                kb = InlineKeyboardMarkup([
+                    [InlineKeyboardButton("➕ ADD CONTENT", callback_data=f"madd:{lid}")],
+                    [InlineKeyboardButton("➖ REMOVE CONTENT", callback_data=f"mrem:{lid}")],
+                    [InlineKeyboardButton("❌ CANCEL", callback_data="noop")],
+                    [InlineKeyboardButton("🔒 CLOSE", callback_data="close")],
+                ])
+                await cq.message.edit_text("✏️ <b>Edit Content</b>", reply_markup=kb)
+            elif data.startswith("madd:") and mod:
+                lid = data.split(":", 1)[1]
+                states[sk(uid, cid)] = {"flow": "sp_add", "link_id": lid}
+                await cq.message.edit_text(
+                    f"➕ Ab nayi files bhejo — add hoti jayengi!\nLink: <code>{lid}</code>")
+            elif data.startswith("mrem:") and mod:
+                lid = data.split(":", 1)[1]
+                row = await get_bot_link(cid, lid)
+                if not row:
+                    await cq.answer("Link nahi mila", show_alert=True)
+                    return
+                ids = json.loads(row["msg_ids"])
+                kb = [[InlineKeyboardButton(f"❌ File {i + 1} (msg {x})",
+                                            callback_data=f"mrdel:{lid}:{i}")]
+                      for i, x in enumerate(ids[:20])]
+                kb.append([InlineKeyboardButton("🔒 CLOSE", callback_data="close")])
+                await cq.message.edit_text("➖ Kaunsi file hatani hai?",
+                                           reply_markup=InlineKeyboardMarkup(kb))
+            elif data.startswith("mrdel:") and mod:
+                _, lid, idx = data.split(":")
+                row = await get_bot_link(cid, lid)
+                if row:
+                    ids = json.loads(row["msg_ids"])
+                    i = int(idx)
+                    if 0 <= i < len(ids):
+                        ids.pop(i)
+                        await pool.execute("UPDATE fb_files SET msg_ids=$1 WHERE link_id=$2",
+                                           json.dumps(ids), lid)
+                        await cq.answer("🗑 Remove ho gayi!")
+                        await cq.message.edit_text(f"✅ Ab {len(ids)} files hain. (/genlink wapas se dekh lo)")
+                        return
+                await cq.answer("Error", show_alert=True)
+            elif data == "close":
+                try:
+                    await cq.message.delete()
+                except Exception:
+                    pass
+            elif data == "noop":
+                await cq.answer()
+            await cq.answer()
+        except Exception as e:
+            print(f"[filebot] clone cb err: {str(e)[:100]}")
+            try:
+                await cq.answer()
+            except Exception:
+                pass
+
+    return on_message, on_callback
+
+
+# =========================================================
+#                    BOOT / LIFECYCLE
+# =========================================================
+
+async def boot_clone(clone):
+    """clone ko start karo (client + handlers)"""
+    cid = clone["id"]
+    if cid in clone_clients:
+        return True
+    try:
+        c = Client(f"clone_{cid}", api_id=API_ID, api_hash=API_HASH,
+                   bot_token=clone["token"], in_memory=True)
+        on_msg, on_cb = make_clone_handlers(cid)
+        c.add_handler(MessageHandler(on_msg, filters.private))
+        c.add_handler(CallbackQueryHandler(on_cb))
+        await c.start()
+        me = await c.get_me()
+        if me.username and me.username != clone.get("bot_username"):
+            await pool.execute("UPDATE fb_clones SET bot_username=$1 WHERE id=$2", me.username, cid)
+        clone_clients[cid] = c
+        print(f"[filebot] clone #{cid} LIVE: @{me.username}")
+        return True
+    except Exception as e:
+        print(f"[filebot] clone #{cid} start FAIL: {str(e)[:100]}")
+        return False
+
 
 async def start():
-    global client, pool, bot_me
+    global pool, main_client, main_me
     if not TOKEN:
         print("[filebot] FILESTORE_BOT_TOKEN missing — file bot OFF")
         return
@@ -426,40 +1077,88 @@ async def start():
         return
     pool = await asyncpg.create_pool(DB_URL, statement_cache_size=0, min_size=1, max_size=5)
     await pool.execute("""
-        CREATE TABLE IF NOT EXISTS fs_files (
+        CREATE TABLE IF NOT EXISTS fb_clones (
             id SERIAL PRIMARY KEY,
-            link_id TEXT UNIQUE NOT NULL,
-            chat_id BIGINT NOT NULL,
-            msg_ids TEXT NOT NULL,
-            created_by BIGINT,
+            owner_id BIGINT NOT NULL,
+            owner_name TEXT,
+            token TEXT NOT NULL,
+            bot_username TEXT,
+            start_msg TEXT,
+            start_photo TEXT,
+            auto_delete INT DEFAULT 0,
+            active BOOLEAN DEFAULT true,
             created_at TIMESTAMP DEFAULT now()
         )""")
     await pool.execute("""
-        CREATE TABLE IF NOT EXISTS fs_users (
-            user_id BIGINT PRIMARY KEY,
-            name TEXT,
-            joined TIMESTAMP DEFAULT now()
+        CREATE TABLE IF NOT EXISTS fb_fsub (
+            clone_id INT NOT NULL,
+            chat_id TEXT NOT NULL,
+            title TEXT,
+            link TEXT,
+            join_request BOOLEAN DEFAULT false,
+            UNIQUE (clone_id, chat_id)
         )""")
     await pool.execute("""
-        CREATE TABLE IF NOT EXISTS fs_banned (
-            user_id BIGINT PRIMARY KEY
+        CREATE TABLE IF NOT EXISTS fb_mods (
+            clone_id INT NOT NULL,
+            user_id BIGINT NOT NULL,
+            UNIQUE (clone_id, user_id)
         )""")
-    client = Client("filebot", api_id=API_ID, api_hash=API_HASH,
-                    bot_token=TOKEN, in_memory=True)
-    client.add_handler(MessageHandler(on_message, filters.private))
-    client.add_handler(CallbackQueryHandler(on_callback))
-    await client.start()
-    bot_me = await client.get_me()
-    print(f"[filebot] LIVE: @{bot_me.username}")
+    await pool.execute("""
+        CREATE TABLE IF NOT EXISTS fb_files (
+            link_id TEXT PRIMARY KEY,
+            clone_id INT NOT NULL,
+            chat_id TEXT NOT NULL,
+            msg_ids TEXT NOT NULL,
+            created_by BIGINT,
+            special BOOLEAN DEFAULT false,
+            created_at TIMESTAMP DEFAULT now()
+        )""")
+    await pool.execute("""
+        CREATE TABLE IF NOT EXISTS fb_users (
+            clone_id INT NOT NULL,
+            user_id BIGINT NOT NULL,
+            name TEXT,
+            joined TIMESTAMP DEFAULT now(),
+            UNIQUE (clone_id, user_id)
+        )""")
+    await pool.execute("""
+        CREATE TABLE IF NOT EXISTS fb_banned (
+            clone_id INT NOT NULL,
+            user_id BIGINT NOT NULL,
+            UNIQUE (clone_id, user_id)
+        )""")
+
+    main_client = Client("filebot_main", api_id=API_ID, api_hash=API_HASH,
+                         bot_token=TOKEN, in_memory=True)
+    main_client.add_handler(MessageHandler(main_on_message, filters.private))
+    main_client.add_handler(CallbackQueryHandler(main_on_callback))
+    await main_client.start()
+    main_me = await main_client.get_me()
+    print(f"[filebot] MAIN bot LIVE: @{main_me.username}")
+
+    rows = await pool.fetch("SELECT * FROM fb_clones WHERE active=true ORDER BY id")
+    ok = 0
+    for r in rows:
+        if await boot_clone(dict(r)):
+            ok += 1
+        await asyncio.sleep(0.3)
+    print(f"[filebot] {ok}/{len(rows)} clones booted")
 
 
 async def stop():
-    global client, pool
-    if client:
+    global pool, main_client
+    if main_client:
         try:
-            await client.stop()
+            await main_client.stop()
         except Exception:
             pass
+    for c in list(clone_clients.values()):
+        try:
+            await c.stop()
+        except Exception:
+            pass
+    clone_clients.clear()
     if pool:
         try:
             await pool.close()
@@ -470,6 +1169,6 @@ async def stop():
 if __name__ == "__main__":
     async def _main():
         await start()
-        print("[filebot] standalone mode — Ctrl+C to stop")
+        print("[filebot] standalone — Ctrl+C to stop")
         await asyncio.Event().wait()
     asyncio.run(_main())
