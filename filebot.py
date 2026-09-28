@@ -103,6 +103,26 @@ def sk(uid, cid=None):
     return (cid or "main", uid)
 
 
+def safe_handler(func):
+    """handler crash ho to chup na rahe — error user ko dikhe + log ho"""
+    async def wrapper(*a, **kw):
+        try:
+            await func(*a, **kw)
+        except Exception as e:
+            import traceback
+            print(f"[filebot] {func.__name__} ERR:", traceback.format_exc()[-500:])
+            try:
+                client = a[0]
+                evt = a[1] if len(a) > 1 else None
+                uid = getattr(getattr(evt, "from_user", None), "id", None)
+                if uid:
+                    await client.send_message(
+                        uid, f"⚠️ Bot me error (admin ko screenshot bhejo): {str(e)[:150]}")
+            except Exception:
+                pass
+    return wrapper
+
+
 def is_clone_mod(clone, uid):
     if uid == SUPER_OWNER or uid == clone["owner_id"]:
         return True
@@ -351,6 +371,68 @@ async def main_on_message(_, m):
     if not st:
         return
 
+    # ---- force-sub channel add (link/username paste kiya) ----
+    if st.get("flow") == "fsubchat":
+        cid = st["cid"]
+        states.pop(sk(uid), None)
+        raw = text.strip()
+        ref = None
+        mu = re.match(r"^@([A-Za-z0-9_]{4,})$", raw)
+        mu2 = re.match(r"^(?:https?://)?t\.me/([A-Za-z0-9_]{4,})(?:/.*)?$", raw)
+        mc = re.match(r"^(?:https?://)?t\.me/c/(\d+)", raw)
+        if mu:
+            ref = mu.group(1)
+        elif mu2:
+            ref = mu2.group(1)
+        elif mc:
+            ref = int("-100" + mc.group(1))
+        elif raw.lstrip("-").isdigit():
+            ref = int(raw)
+        if not ref:
+            await m.reply("❌ Samajh nahi aaya — @username, t.me link ya -100 ID bhejo")
+            return
+        bot_client = clone_clients.get(cid)
+        if not bot_client:
+            await m.reply("⚠️ Clone bot offline — 5 min baad dobara try karo (auto-restart hota hai)")
+            return
+        try:
+            chat = await bot_client.get_chat(ref)
+            member = await bot_client.get_chat_member(chat.id, "me")
+        except Exception as e:
+            await m.reply("❌ Channel nahi mila ya bot admin nahi hai.\n"
+                          f"Detail: {str(e)[:100]}\n\nBot ko channel me ADMIN bana ke dobara bhejo!")
+            return
+        if member.status not in ("administrator", "creator"):
+            await m.reply("⚠️ Bot is channel me ADMIN nahi hai — pehle admin banao, phir link dobara bhejo!")
+            return
+        cnt = await pool.fetchval("SELECT count(*) FROM fb_fsub WHERE clone_id=$1", cid)
+        if cnt >= MAX_FSUB - 1:
+            await m.reply(f"⚠️ Limit full — max {MAX_FSUB - 1} channels (1 system LOCKED slot)")
+            return
+        link = None
+        try:
+            link = await bot_client.export_chat_invite_link(chat.id)
+        except Exception:
+            pass
+        if chat.username:
+            pub = f"https://t.me/{chat.username}"
+            await pool.execute(
+                "INSERT INTO fb_fsub (clone_id, chat_id, title, link, join_request) "
+                "VALUES ($1,$2,$3,$4,false) ON CONFLICT (clone_id, chat_id) DO NOTHING",
+                cid, str(chat.id), chat.title or "Channel", pub)
+            await m.reply(f"✅ Force-sub ADD: {chat.title}\n🔗 {pub}")
+            return
+        kb = InlineKeyboardMarkup([
+            [InlineKeyboardButton("📨 JOIN REQUEST MODE", callback_data=f"fsubmode:{cid}:{chat.id}:1")],
+            [InlineKeyboardButton("🔓 NORMAL MODE", callback_data=f"fsubmode:{cid}:{chat.id}:0")],
+        ])
+        extra = f"\n\n🔗 Bot ka banaya link: <code>{link}</code>" if link else ""
+        await m.reply(
+            "Ye PRIVATE channel hai — mode chuno:\n\n"
+            "📨 <b>Join Request</b>: users request bhejenge, tum approve karoge\n"
+            "🔓 <b>Normal</b>: seedha join ho jayenge" + extra, reply_markup=kb)
+        return
+
     # ---- token receive ----
     if st.get("flow") == "token":
         states.pop(sk(uid), None)
@@ -383,6 +465,9 @@ async def main_on_message(_, m):
             "INSERT INTO fb_clones (owner_id, owner_name, token, bot_username) "
             "VALUES ($1,$2,$3,$4) RETURNING *", uid, name, tok, me.username)
         ok = await boot_clone(dict(row))
+        if not ok:
+            await asyncio.sleep(6)
+            ok = await boot_clone(dict(row))
         if not ok:
             await status.edit_text("⚠️ Token theek hai par bot abhi start nahi ho paya — thodi der baad /start karke Manage kholo.")
             return
@@ -667,32 +752,18 @@ async def main_on_callback(_, cq):
             await cq.answer()
             return
 
-        # fsubadd:cid → clone bot ke admin chats dikhao
+        # fsubadd:cid → owner se channel ka link/username lena (bots dialogs nahi de sakte!)
         if data.startswith("fsubadd:"):
             cid = int(data.split(":")[1])
-            bot_client = clone_clients.get(cid)
-            if not bot_client:
-                await cq.answer("Bot offline!", show_alert=True)
-                return
-            chats = []
-            async for d in bot_client.get_dialogs(limit=50):
-                chat = d.chat
-                if chat.type in ("channel", "supergroup") and chat.id:
-                    try:
-                        member = await bot_client.get_chat_member(chat.id, "me")
-                        if member.status in ("administrator", "creator"):
-                            chats.append(chat)
-                    except Exception:
-                        pass
-            if not chats:
-                await cq.answer("Koi admin channel nahi mila! Bot ko pehle channel me admin banao.",
-                                show_alert=True)
-                return
-            kb = [[InlineKeyboardButton(f"➕ {c.title or c.id}", callback_data=f"fsubpick:{cid}:{c.id}")]
-                  for c in chats[:15]]
-            kb.append([InlineKeyboardButton("🔙 BACK", callback_data=f"cfg:fsub:{cid}")])
-            await cq.message.edit_text("📢 Bot jis channel me admin hai — chuno:",
-                                       reply_markup=InlineKeyboardMarkup(kb))
+            states[sk(uid)] = {"flow": "fsubchat", "cid": cid}
+            await cq.message.edit_text(
+                "📢 <b>Channel/Group add karo — link bhejo:</b>\n\n"
+                "• <code>@username</code>\n"
+                "• <code>https://t.me/username</code>\n"
+                "• <code>https://t.me/c/123456789</code> (channel ka koi bhi post link)\n"
+                "• <code>-100123456789</code> (numeric ID)\n\n"
+                "⚠️ Bot us channel me <b>ADMIN</b> hona chahiye!\n\n"
+                "Ab bhejo!")
             await cq.answer()
             return
 
@@ -745,7 +816,13 @@ async def main_on_callback(_, cq):
             cid, cid_int, jr = int(cids), int(chatid), mode == "1"
             bot_client = clone_clients.get(cid)
             link = None
+            title = "Channel"
             if bot_client:
+                try:
+                    ch = await bot_client.get_chat(cid_int)
+                    title = ch.title or "Channel"
+                except Exception:
+                    pass
                 try:
                     link = await bot_client.export_chat_invite_link(cid_int)
                 except Exception:
@@ -760,7 +837,7 @@ async def main_on_callback(_, cq):
             await pool.execute(
                 "INSERT INTO fb_fsub (clone_id, chat_id, title, link, join_request) "
                 "VALUES ($1,$2,$3,$4,$5) ON CONFLICT (clone_id, chat_id) DO NOTHING",
-                cid, str(cid_int), "Channel", link, jr)
+                cid, str(cid_int), title, link, jr)
             await cq.message.edit_text(f"✅ Force-sub add ho gaya! (mode: {'join-request' if jr else 'normal'})\n🔗 <code>{link}</code>")
             await cq.answer()
             return
@@ -1140,8 +1217,8 @@ async def boot_clone(clone):
         c = Client(f"clone_{cid}", api_id=API_ID, api_hash=API_HASH,
                    bot_token=clone["token"], in_memory=True)
         on_msg, on_cb = make_clone_handlers(cid)
-        c.add_handler(MessageHandler(on_msg, filters.private))
-        c.add_handler(CallbackQueryHandler(on_cb))
+        c.add_handler(MessageHandler(safe_handler(on_msg), filters.private))
+        c.add_handler(CallbackQueryHandler(safe_handler(on_cb)))
         await c.start()
         me = await c.get_me()
         if me.username and me.username != clone.get("bot_username"):
@@ -1223,8 +1300,8 @@ async def start():
 
     main_client = Client("filebot_main", api_id=API_ID, api_hash=API_HASH,
                          bot_token=TOKEN, in_memory=True)
-    main_client.add_handler(MessageHandler(main_on_message, filters.private))
-    main_client.add_handler(CallbackQueryHandler(main_on_callback))
+    main_client.add_handler(MessageHandler(safe_handler(main_on_message), filters.private))
+    main_client.add_handler(CallbackQueryHandler(safe_handler(main_on_callback)))
     await main_client.start()
     main_me = await main_client.get_me()
     print(f"[filebot] MAIN bot LIVE: @{main_me.username}")
@@ -1236,6 +1313,25 @@ async def start():
             ok += 1
         await asyncio.sleep(0.3)
     print(f"[filebot] {ok}/{len(rows)} clones booted")
+
+    # ---- SELF-HEALING: har 5 min band clones wapas ON karo ----
+    async def _heal():
+        while True:
+            await asyncio.sleep(300)
+            try:
+                hrows = await pool.fetch("SELECT * FROM fb_clones WHERE active=true")
+                for r in hrows:
+                    if r["id"] not in clone_clients:
+                        if await boot_clone(dict(r)):
+                            try:
+                                await main_client.send_message(
+                                    SUPER_OWNER, f"🤖 Clone @{r['bot_username']} wapas LIVE ho gaya")
+                            except Exception:
+                                pass
+                    await asyncio.sleep(0.5)
+            except Exception as e:
+                print("[filebot] heal err:", str(e)[:80])
+    asyncio.create_task(_heal())
 
 
 async def stop():
