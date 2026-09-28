@@ -194,9 +194,9 @@ async def _export_link(client, chat_id, join_request=False):
             from pyrogram.raw.functions.messages import ExportChatInvite
             peer = await client.resolve_peer(chat_id)
             try:
-                r = await client.invoke(ExportChatInvite(peer=peer, creates_join_request=True))
-            except TypeError:
                 r = await client.invoke(ExportChatInvite(peer=peer, request_needed=True))
+            except TypeError:
+                r = await client.invoke(ExportChatInvite(peer=peer, creates_join_request=True))
             link = getattr(r, "link", None)
             if link:
                 return link
