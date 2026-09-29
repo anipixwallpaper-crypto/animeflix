@@ -31,6 +31,7 @@ API_HASH = os.getenv("API_HASH", "")
 TOKEN = os.getenv("FILESTORE_BOT_TOKEN", "").strip()
 DB_URL = os.getenv("DATABASE_URL", "")
 SUPER_OWNER = int(os.getenv("OWNER_ID", "0") or 0)
+SUPER_OWNER_USERNAME = None  # owner ka @username (message aane par auto-capture)
 UPDATE_LINK = os.getenv("FB_UPDATE_LINK", "https://t.me/+eSfza2-yNXpmNDk1").strip()  # link YA -100 channel ID
 UPDATE_LINK_RAW = UPDATE_LINK
 SYSTEM_FSUB_LINK = os.getenv("FB_SYS_FSUB_LINK", "https://t.me/+_hPJlkI9jNBmMTU1")  # owner ka LOCKED fsub
@@ -204,14 +205,21 @@ def clone_welcome_kb():
 
 def about_text(clone, bot_name):
     owner_name = clone.get("owner_name") or "Owner"
+    # username ho to PERMANENT t.me link (hamesha clickable) — warna tg://user fallback
+    owner_un = clone.get("owner_username")
+    if owner_un:
+        owner_link = f"https://t.me/{owner_un.lstrip('@')}"
+    else:
+        owner_link = f"tg://user?id={clone['owner_id']}"
+    sup_link = f"https://t.me/{SUPER_OWNER_USERNAME.lstrip('@')}" if SUPER_OWNER_USERNAME else f"tg://user?id={SUPER_OWNER}"
     return (
         "✨ ᴀʙᴏᴜᴛ ᴍᴇ\n\n"
         f"✰ ᴍʏ ɴᴀᴍᴇ: {bot_name}\n"
         f"✰ ᴄʟᴏɴᴇ ᴏꜰ: <a href='{main_link()}'>AnimeFlix File Store</a>\n"
-        f"✰ ᴍʏ ᴏᴡɴᴇʀ: <a href='tg://user?id={clone['owner_id']}'>{owner_name}</a>\n"
-        f"✰ ᴜᴘᴅᴀᴛᴇs: <a href='{main_link()}'>AnimeFlix File Store</a>\n"
-        f"✰ sᴜᴘᴘᴏʀᴛ: <a href='tg://user?id={SUPER_OWNER}'>Lovely anime</a>\n"
-        f"✰ ᴄᴏɴᴛᴀᴄᴛ ꜰᴏʀ ʙᴏᴛ ᴅᴇᴠᴇʟᴏᴘɪɴɢ: <a href='tg://user?id={SUPER_OWNER}'>AnimeFlix</a>"
+        f"✰ ᴍʏ ᴏᴡɴᴇʀ: <a href='{owner_link}'>{owner_name}</a>\n"
+        f"✰ ᴜᴘᴅᴀᴛᴇs: <a href='{UPDATE_LINK}'>AnimeFlix File Store</a>\n"
+        f"✰ sᴜᴘᴘᴏʀᴛ: <a href='{sup_link}'>Lovely anime</a>\n"
+        f"✰ ᴄᴏɴᴛᴀᴄᴛ ꜰᴏʀ ʙᴏᴛ ᴅᴇᴠᴇʟᴏᴘɪɴɢ: <a href='{sup_link}'>AnimeFlix</a>"
     )
 
 
@@ -431,7 +439,7 @@ async def fsub_not_joined(cid, uid, client):
 async def join_buttons(cid, uid, client, lid):
     rows = await fsub_not_joined(cid, uid, client)
     if not rows:
-        return None
+        return None, []
     kb = []
     for r in rows:
         rd = dict(r) if not isinstance(r, dict) else r
@@ -455,7 +463,7 @@ async def join_buttons(cid, uid, client, lid):
         else:
             kb.append([InlineKeyboardButton(f"⚠️ {title} — link missing", callback_data="noop")])
     kb.append([InlineKeyboardButton("✅ TRY AGAIN", callback_data=f"try:{lid}")])
-    return InlineKeyboardMarkup(kb)
+    return InlineKeyboardMarkup(kb), rows
 
 
 # ---------------- delivery ----------------
@@ -474,10 +482,16 @@ async def deliver(cid, uid, lid, client):
     if not row:
         await client.send_message(uid, "❌ Link invalid hai ya delete ho chuka.")
         return
-    kb = await join_buttons(cid, uid, client, lid)
+    kb, frows = await join_buttons(cid, uid, client, lid)
     if kb:
+        names = "\n".join(
+            f"• { (dict(r).get('title') or 'Channel') if not isinstance(r, dict) else (r.get('title') or 'Channel') }"
+            for r in frows)
         await client.send_message(
-            uid, "🔒 <b>Pehle channel(s) join karo — phir TRY AGAIN dabao!</b>", reply_markup=kb)
+            uid,
+            "🔒 <b>Pehle ye channel(s) join karo — phir TRY AGAIN dabao!</b>\n\n"
+            f"{names}",
+            reply_markup=kb)
         return
     clone = await load_clone(cid)
     ad = clone["auto_delete"] if clone else 0
@@ -509,6 +523,15 @@ async def main_on_message(_, m):
         name = (m.from_user.first_name if m.from_user else "friend") or "friend"
     except Exception:
         return
+    # ---- SUPER OWNER ka @username auto-capture (permanent profile links ke liye) ----
+    global SUPER_OWNER_USERNAME
+    if uid == SUPER_OWNER and getattr(m.from_user, "username", None):
+        if SUPER_OWNER_USERNAME != m.from_user.username:
+            SUPER_OWNER_USERNAME = m.from_user.username
+            try:
+                await set_setting("super_owner_username", SUPER_OWNER_USERNAME)
+            except Exception:
+                pass
     text = (m.text or m.caption or "").strip()
 
     if text.startswith("/start"):
@@ -531,11 +554,12 @@ async def main_on_message(_, m):
         return
 
     if text.startswith("/about"):
+        sup_link = f"https://t.me/{SUPER_OWNER_USERNAME.lstrip('@')}" if SUPER_OWNER_USERNAME else f"tg://user?id={SUPER_OWNER}"
         await m.reply(
             f"✨ ᴀʙᴏᴜᴛ ᴍᴇ\n\n✰ ᴍʏ ɴᴀᴍᴇ: {main_me.first_name if main_me else 'AnimeFlix File Store'}\n"
-            f"✰ ᴍʏ ᴏᴡɴᴇʀ: <a href='tg://user?id={SUPER_OWNER}'>Lovely anime</a>\n"
+            f"✰ ᴍʏ ᴏᴡɴᴇʀ: <a href='{sup_link}'>Lovely anime</a>\n"
             f"✰ ᴜᴘᴅᴀᴛᴇs: <a href='{UPDATE_LINK}'>Update Channel</a>\n"
-            f"✰ ᴄᴏɴᴛᴀᴄᴛ ꜰᴏʀ ʙᴏᴛ ᴅᴇᴠᴇʟᴏᴘɪɴɢ: <a href='tg://user?id={SUPER_OWNER}'>AnimeFlix</a>")
+            f"✰ ᴄᴏɴᴛᴀᴄᴛ ꜰᴏʀ ʙᴏᴛ ᴅᴇᴠᴇʟᴏᴘɪɴɢ: <a href='{sup_link}'>AnimeFlix</a>")
         return
 
     if text.startswith("/set_sys"):
@@ -1290,6 +1314,14 @@ def make_clone_handlers(cid):
         clone = await load_clone(cid)
         if not clone or not clone["active"]:
             return
+        # ---- clone OWNER ka @username auto-capture (about link ke liye) ----
+        if uid == clone["owner_id"] and getattr(m.from_user, "username", None):
+            if clone.get("owner_username") != m.from_user.username:
+                try:
+                    await pool.execute("UPDATE fb_clones SET owner_username=$1 WHERE id=$2",
+                                       m.from_user.username, cid)
+                except Exception:
+                    pass
         mod = is_clone_mod(clone, uid)
         try:
             await pool.execute(
@@ -1681,6 +1713,14 @@ async def start():
     # purane DB me naye columns add karo (safe — pehle se ho to skip)
     await pool.execute("ALTER TABLE fb_fsub ADD COLUMN IF NOT EXISTS access_hash BIGINT DEFAULT 0")
     await pool.execute("ALTER TABLE fb_fsub ADD COLUMN IF NOT EXISTS username TEXT")
+    await pool.execute("ALTER TABLE fb_clones ADD COLUMN IF NOT EXISTS owner_username TEXT")
+    try:
+        _su = await get_setting("super_owner_username")
+        if _su:
+            global SUPER_OWNER_USERNAME
+            SUPER_OWNER_USERNAME = _su
+    except Exception:
+        pass
     await pool.execute("""
         CREATE TABLE IF NOT EXISTS fb_jreq (
             chat_id TEXT NOT NULL,
