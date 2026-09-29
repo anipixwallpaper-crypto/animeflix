@@ -31,7 +31,7 @@ API_HASH = os.getenv("API_HASH", "")
 TOKEN = os.getenv("FILESTORE_BOT_TOKEN", "").strip()
 DB_URL = os.getenv("DATABASE_URL", "")
 SUPER_OWNER = int(os.getenv("OWNER_ID", "0") or 0)
-FILEBOT_VERSION = "v29-4 (29 Sep: request-list always-check — pending request wale ko content)"  # /version se dikhta hai
+FILEBOT_VERSION = "v30 (29 Sep: force-sub core REWRITE — live request-list + record fallback + exact error)"  # /version se dikhta hai
 SUPER_OWNER_USERNAME = None  # owner ka @username (message aane par auto-capture)
 UPDATE_LINK = os.getenv("FB_UPDATE_LINK", "https://t.me/+eSfza2-yNXpmNDk1").strip()  # link YA -100 channel ID
 UPDATE_LINK_RAW = UPDATE_LINK
@@ -436,14 +436,13 @@ async def _peer_for(client, rd):
     return None
 
 
-async def _in_requests(client, rd, uid):
-    """PRIVATE channel ke PENDING join-requests (APPROVAL LIST) me user hai?
-    NOTE: bot APPROVE nahi karta — sirf dekhta hai.
-    True=mila | False=nahi mila | None=list nahi de payi"""
+async def _requests_lookup(client, rd, uid):
+    """LIVE PENDING join-request list (APPROVAL LIST) — bot APPROVE nahi karta, sirf dekhta hai.
+    return (True/False/None, err_text): True=mila, False=nahi mila, None=API error."""
     try:
         peer = await _peer_for(client, rd)
         if peer is None:
-            return None
+            return None, "peer-missing (REPAIR karo)"
         from pyrogram.raw.functions.messages import GetChatInviteImporters
         from pyrogram.raw.types import InputUserEmpty
         r = await client.invoke(GetChatInviteImporters(
@@ -452,33 +451,58 @@ async def _in_requests(client, rd, uid):
         for imp in (getattr(r, "importers", None) or []):
             u = getattr(imp, "user", None)
             if (getattr(imp, "user_id", 0) or (getattr(u, "id", 0) if u else 0)) == uid:
-                return True
-        return False
+                return True, ""
+        return False, ""
     except Exception as e:
-        print(f"[filebot] requests-check err: chat={rd.get('chat_id')} {str(e)[:60]}")
-        return None
+        return None, str(e)[:70]
+
+
+async def _in_requests(client, rd, uid):
+    """PENDING REQUEST me user? (OWNER RULE: request bheje user ko content milta hai)
+    1) LIVE API (bot channel ka ADMIN ho to chalti hai)
+    2) LIVE fail → handler-record fallback: ChatJoinRequestHandler ne request save ki thi
+       (bot admin hai to request aayi thi — deploy ke baad bhi record DB me safe hai)
+    True=mila | False=nahi mila | None=dono tarike fail"""
+    ok, err = await _requests_lookup(client, rd, uid)
+    if ok is not None:
+        return ok
+    if err:
+        print(f"[filebot] requests-live err: chat={rd.get('chat_id')} {err}")
+    try:
+        row = await pool.fetchrow(
+            "SELECT 1 FROM fb_jreq WHERE chat_id=$1 AND user_id=$2",
+            str(rd.get("chat_id")), uid)
+        if row:
+            return True
+    except Exception:
+        pass
+    return None
 
 
 async def fsub_check_user(client, rd, uid):
-    """REWRITTEN force-sub check — OWNER ke rules:
-    1) channel ke REQUEST-APPROVAL list me user hai?  → theek (content do)
-    2) members/subscribers me user hai?               → theek (content do)
-    3) nahi?                                            → JOIN NOW
-    True=content | False=JOIN NOW
-    NOTE: request-list ab HAMESHA check hota hai (flag ki zaroorat nahi) —
-    join-request channel me pending request bheje user ko content milta hai."""
+    """FORCE-SUB CHECK — PURA DOBARA LIKHA (v3), OWNER ke rules:
+    1) PENDING REQUEST (approval list) me user?  → CONTENT
+    2) MEMBER/SUBSCRIBER? (direct → username → hash) → CONTENT
+    3) verify hi nahi ho paya (API error)         → CONTENT (member ko lock nahi karenge)
+    4) request nahi + member nahi                  → JOIN NOW
+    True=content | False=JOIN NOW"""
     rd = dict(rd) if not isinstance(rd, dict) else rd
-    # ---- 1) PENDING REQUESTS (hamesha — flag OFF ho to bhi) ----
+    # ---- 1) PENDING REQUESTS (live → fallback record) ----
     r = await _in_requests(client, rd, uid)
     if r is True:
         return True
-    # ---- 2) MEMBER/SUBSCRIBER check ----
+    # ---- 2) MEMBER CHECK (shuru jaisa: direct → username → hash) ----
     m = await _is_member(client, rd, uid)
     if m is True:
+        # member ban gaya — purana request-record saaf kar do (stale se bacho)
+        try:
+            await pool.execute("DELETE FROM fb_jreq WHERE chat_id=$1 AND user_id=$2",
+                               str(rd.get("chat_id")), uid)
+        except Exception:
+            pass
         return True
     if m is False:
         return False
-    # verify nahi ho paya — user ko lock nahi karenge
     return True
 
 
@@ -569,9 +593,10 @@ async def deliver(cid, uid, lid, client):
                 for r in frows:
                     rd = dict(r) if not isinstance(r, dict) else r
                     mem = await _is_member(client, rd, uid)
-                    req = await _in_requests(client, rd, uid)
+                    rok, rerr = await _requests_lookup(client, rd, uid)
+                    rtxt = str(rok) if rok is not None else f"ERR:{rerr}"
                     dbg.append(f"🔍 {rd.get('title') or rd.get('chat_id')}: "
-                               f"member={mem} request={req} "
+                               f"member={mem} request={rtxt} "
                                f"flag={'on' if rd.get('join_request') else 'off'} "
                                f"hash={'✅' if int(rd.get('access_hash') or 0) else '❌'}")
                 msg += "\n\n" + "\n".join(dbg)
@@ -1475,7 +1500,8 @@ def make_clone_handlers(cid):
             sysr = await sys_fsub_row()
             for r in rows:
                 rd = dict(r)
-                req = await _in_requests(_, rd, target) if rd.get("join_request") else None
+                rok, rerr = await _requests_lookup(_, rd, target)
+                req = rok if rok is not None else f"ERR:{rerr}"
                 mem = await _is_member(_, rd, target)
                 ok = await fsub_check_user(_, rd, target)
                 lines.append(
