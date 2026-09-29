@@ -12,7 +12,7 @@ CLONE BOTS: asli file store —
 ENV:
   FILESTORE_BOT_TOKEN — MAIN bot ka token
   OWNER_ID            — asli malik (super admin)
-  FB_UPDATE_LINK     — update channel ka link (default: owner ka diya hua)
+  FB_UPDATE_LINK     — update channel ka link YA -100 channel ID (bot admin ho to khud link banayega)
   FB_MAX_CLONES      — total clones limit (default 25)
 """
 import os
@@ -31,7 +31,8 @@ API_HASH = os.getenv("API_HASH", "")
 TOKEN = os.getenv("FILESTORE_BOT_TOKEN", "").strip()
 DB_URL = os.getenv("DATABASE_URL", "")
 SUPER_OWNER = int(os.getenv("OWNER_ID", "0") or 0)
-UPDATE_LINK = os.getenv("FB_UPDATE_LINK", "https://t.me/+eSfza2-yNXpmNDk1")
+UPDATE_LINK = os.getenv("FB_UPDATE_LINK", "-1004362582599").strip()  # link YA -100 channel ID
+UPDATE_LINK_RAW = UPDATE_LINK
 SYSTEM_FSUB_LINK = os.getenv("FB_SYS_FSUB_LINK", "https://t.me/+_hPJlkI9jNBmMTU1")  # owner ka LOCKED fsub
 
 
@@ -47,6 +48,39 @@ async def set_setting(key, value):
     await pool.execute(
         "INSERT INTO fb_settings (key, value) VALUES ($1,$2) ON CONFLICT (key) DO UPDATE SET value=$2",
         key, str(value))
+
+
+async def resolve_update_link():
+    """UPDATE_LINK me channel ID (-100...) diya ho to bot khud
+    invite link bana lega (main bot us channel me ADMIN ho to).
+    Ban gaya link DB me save hota hai — restart ke baad bhi rehta hai."""
+    global UPDATE_LINK
+    if UPDATE_LINK_RAW.startswith("http"):
+        return
+    try:
+        saved_for = await get_setting("update_link_for")
+        saved = await get_setting("update_link")
+        if saved and saved_for == UPDATE_LINK_RAW:
+            UPDATE_LINK = saved
+            return
+    except Exception:
+        pass
+    try:
+        cid = int(UPDATE_LINK_RAW)
+        link = await _export_link(main_client, cid)
+        if link:
+            try:
+                await set_setting("update_link", link)
+                await set_setting("update_link_for", UPDATE_LINK_RAW)
+            except Exception:
+                pass
+            UPDATE_LINK = link
+            print(f"[filebot] UPDATE channel link ban gaya: {link}")
+            return
+    except Exception as e:
+        print("[filebot] update-link fail:", str(e)[:60])
+    s = UPDATE_LINK_RAW
+    UPDATE_LINK = f"https://t.me/c/{s[4:]}" if s.startswith("-100") else f"https://t.me/c/{s.lstrip('-')}"
 
 
 async def sys_fsub_row():
@@ -1637,6 +1671,7 @@ async def start():
     main_client.add_handler(ChatJoinRequestHandler(safe_handler(main_on_join_request)))
     await main_client.start()
     main_me = await main_client.get_me()
+    await resolve_update_link()
     print(f"[filebot] MAIN bot LIVE: @{main_me.username}")
 
     rows = await pool.fetch("SELECT * FROM fb_clones WHERE active=true ORDER BY id")
@@ -1693,6 +1728,12 @@ async def start():
                     await asyncio.sleep(0.3)
             except Exception as e:
                 print("[filebot] heal-fsub err:", str(e)[:80])
+            # ---- update channel link retry (bot admin bane to link ban jayega) ----
+            if not UPDATE_LINK_RAW.startswith("http") and "/c/" in UPDATE_LINK:
+                try:
+                    await resolve_update_link()
+                except Exception:
+                    pass
     asyncio.create_task(_heal())
 
 
