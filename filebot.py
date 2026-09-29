@@ -31,6 +31,7 @@ API_HASH = os.getenv("API_HASH", "")
 TOKEN = os.getenv("FILESTORE_BOT_TOKEN", "").strip()
 DB_URL = os.getenv("DATABASE_URL", "")
 SUPER_OWNER = int(os.getenv("OWNER_ID", "0") or 0)
+FILEBOT_VERSION = "v29-2 (29 Sep: fs-rewrite + raw-about)"  # /version se dikhta hai
 SUPER_OWNER_USERNAME = None  # owner ka @username (message aane par auto-capture)
 UPDATE_LINK = os.getenv("FB_UPDATE_LINK", "https://t.me/+eSfza2-yNXpmNDk1").strip()  # link YA -100 channel ID
 UPDATE_LINK_RAW = UPDATE_LINK
@@ -624,6 +625,10 @@ async def main_on_message(_, m):
             f"✰ ᴍʏ ᴏᴡɴᴇʀ: <a href='{sup_link}'>Lovely anime</a>\n"
             f"✰ ᴜᴘᴅᴀᴛᴇs: <a href='{UPDATE_LINK}'>Update Channel</a>\n"
             f"✰ ᴄᴏɴᴛᴀᴄᴛ ꜰᴏʀ ʙᴏᴛ ᴅᴇᴠᴇʟᴏᴘɪɴɢ: <a href='{sup_link}'>AnimeFlix</a>")
+        return
+
+    if text.startswith("/version"):
+        await m.reply(f"📦 <b>Code version:</b> <code>{FILEBOT_VERSION}</code>")
         return
 
     if text.startswith("/set_sys"):
@@ -1426,8 +1431,52 @@ def make_clone_handlers(cid):
                               f"@{clone['bot_username']}" if clone["bot_username"] else "File Store Bot")
             return
 
+        if text.startswith("/version"):
+            await _.send_message(
+                uid, f"📦 <b>Code version:</b> <code>{FILEBOT_VERSION}</code>")
+            return
+
         if text.startswith("/id"):
             await _.send_message(uid, f"🆔 Tumhara ID: <code>{uid}</code>")
+            return
+
+        # ---- FSUB DEBUG: owner/mod apne liye dekhe KAUNSA channel kyu block ho raha ----
+        if text.startswith("/fsdebug"):
+            if uid != clone["owner_id"] and uid != SUPER_OWNER and not mod:
+                return
+            target = uid
+            for part in text.split():
+                if part.lstrip("-").isdigit() and len(part) >= 5:
+                    target = int(part)
+                    break
+            lines = [f"🔍 <b>FSUB DEBUG — user {target}</b>", ""]
+            rows = await pool.fetch("SELECT * FROM fb_fsub WHERE clone_id=$1", cid)
+            sysr = await sys_fsub_row()
+            for r in rows:
+                rd = dict(r)
+                req = await _in_requests(_, rd, target) if rd.get("join_request") else None
+                mem = await _is_member(_, rd, target)
+                ok = await fsub_check_user(_, rd, target)
+                lines.append(
+                    f"• <b>{rd.get('title') or rd.get('chat_id')}</b>\n"
+                    f"   chat_id: <code>{rd.get('chat_id')}</code> | "
+                    f"hash: {'✅' if int(rd.get('access_hash') or 0) else '❌ NAHI'} | "
+                    f"username: {rd.get('username') or '—'} | "
+                    f"join_request: {'haan' if rd.get('join_request') else 'nahi'}\n"
+                    f"   request-list: {req} | member-check: {mem} | "
+                    f"result: {'✅ CONTENT' if ok else '🔒 JOIN NOW'}")
+            if sysr and main_client:
+                uname = await get_setting("sys_fsub_username")
+                ah = int(await get_setting("sys_fsub_access_hash", 0) or 0)
+                pseudo = {"chat_id": str(sysr["chat_id"]), "username": uname,
+                          "access_hash": ah, "join_request": False}
+                mem = await _is_member(main_client, pseudo, target)
+                ok = await fsub_check_user(main_client, pseudo, target)
+                lines.append(
+                    f"• <b>SYSTEM ({sysr.get('title')})</b>\n"
+                    f"   member-check: {mem} | result: {'✅ CONTENT' if ok else '🔒 JOIN NOW'}")
+            lines.append("\n💡 hash ❌ = REPAIR karo (FORCE SUB → 🔧 REPAIR, channel ka message forward karo)")
+            await _.send_message(uid, "\n".join(lines), disable_web_page_preview=True)
             return
 
         if text.startswith("/setphoto"):
@@ -1846,6 +1895,7 @@ async def start():
     await main_client.start()
     main_me = await main_client.get_me()
     await resolve_update_link()
+    print(f"[filebot] RUNNING CODE: {FILEBOT_VERSION}")
     print(f"[filebot] MAIN bot LIVE: @{main_me.username}")
 
     rows = await pool.fetch("SELECT * FROM fb_clones WHERE active=true ORDER BY id")
