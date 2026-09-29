@@ -261,15 +261,17 @@ def link_kb(url):
 
 async def _is_member(client, r, uid):
     """True=member | False=nahi | None=pata nahi.
-    Username se (public) ya access_hash se (private) — DEPLOY KE BAAD BHI kaam kare."""
+    Username se (public) ya access_hash se (private) — DEPLOY KE BAAD BHI kaam kare.
+    USER_NOT_PARTICIPANT error = member NAHI = False (yahi free-content bug ka fix hai)."""
     rd = dict(r) if not isinstance(r, dict) else r
     uname = rd.get("username")
     if uname:
         try:
             m = await client.get_chat_member(uname, uid)
             return not _is_not_joined(m)
-        except Exception:
-            pass
+        except Exception as e:
+            if "PARTICIPANT" in str(e).upper():
+                return False
     try:
         s = str(rd.get("chat_id"))
         cid = int(s[4:]) if s.startswith("-100") else abs(int(s))
@@ -281,6 +283,26 @@ async def _is_member(client, r, uid):
                 channel=InputChannel(channel_id=cid, access_hash=ah),
                 participant=InputUser(user_id=uid, access_hash=0)))
             return True
+    except Exception as e:
+        if "PARTICIPANT" in str(e).upper():
+            return False
+    # ---- peer session me cached ho to direct check + HASH BACKFILL (self-heal) ----
+    try:
+        chat_id = rd.get("chat_id")
+        ref = chat_ref(chat_id) if str(chat_id).lstrip("-").isdigit() else chat_id
+        m = await client.get_chat_member(ref, uid)
+        # peer cached mila — permanent ID save kar do taki aage kabhi na toote
+        try:
+            p = await client.resolve_peer(ref)
+            ah2 = int(getattr(p, "access_hash", 0) or 0)
+            if ah2:
+                await pool.execute(
+                    "UPDATE fb_fsub SET access_hash=$1 WHERE chat_id=$2",
+                    ah2, str(chat_id))
+                print(f"[filebot] fsub HEALED (hash saved): {chat_id}")
+        except Exception:
+            pass
+        return not _is_not_joined(m)
     except Exception as e:
         if "PARTICIPANT" in str(e).upper():
             return False
@@ -1509,6 +1531,35 @@ async def start():
                     await asyncio.sleep(0.5)
             except Exception as e:
                 print("[filebot] heal err:", str(e)[:80])
+            # ---- PURANE fsub rows heal: hash save karo jahan tak ho sake ----
+            try:
+                orows = await pool.fetch(
+                    "SELECT DISTINCT chat_id FROM fb_fsub "
+                    "WHERE (access_hash IS NULL OR access_hash=0) AND username IS NULL")
+                for o in orows:
+                    cids = await pool.fetch(
+                        "SELECT DISTINCT clone_id FROM fb_fsub WHERE chat_id=$1", o["chat_id"])
+                    for cr in cids:
+                        cc = clone_clients.get(cr["clone_id"])
+                        if not cc:
+                            continue
+                        try:
+                            ref = chat_ref(o["chat_id"])
+                            ch = await cc.get_chat(ref)
+                            p = await cc.resolve_peer(ref)
+                            ah = int(getattr(p, "access_hash", 0) or 0)
+                            un = getattr(ch, "username", None)
+                            if ah or un:
+                                await pool.execute(
+                                    "UPDATE fb_fsub SET access_hash=$1, username=$2 WHERE chat_id=$3",
+                                    ah, un, str(o["chat_id"]))
+                                print(f"[filebot] fsub HEALED: {o['chat_id']}")
+                            break
+                        except Exception:
+                            continue
+                    await asyncio.sleep(0.3)
+            except Exception as e:
+                print("[filebot] heal-fsub err:", str(e)[:80])
     asyncio.create_task(_heal())
 
 
