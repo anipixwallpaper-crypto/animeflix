@@ -31,7 +31,7 @@ API_HASH = os.getenv("API_HASH", "")
 TOKEN = os.getenv("FILESTORE_BOT_TOKEN", "").strip()
 DB_URL = os.getenv("DATABASE_URL", "")
 SUPER_OWNER = int(os.getenv("OWNER_ID", "0") or 0)
-FILEBOT_VERSION = "v29-3 (29 Sep: direct-first fsub + about resend + owner-debug)"  # /version se dikhta hai
+FILEBOT_VERSION = "v29-4 (29 Sep: request-list always-check — pending request wale ko content)"  # /version se dikhta hai
 SUPER_OWNER_USERNAME = None  # owner ka @username (message aane par auto-capture)
 UPDATE_LINK = os.getenv("FB_UPDATE_LINK", "https://t.me/+eSfza2-yNXpmNDk1").strip()  # link YA -100 channel ID
 UPDATE_LINK_RAW = UPDATE_LINK
@@ -464,13 +464,14 @@ async def fsub_check_user(client, rd, uid):
     1) channel ke REQUEST-APPROVAL list me user hai?  → theek (content do)
     2) members/subscribers me user hai?               → theek (content do)
     3) nahi?                                            → JOIN NOW
-    True=content | False=JOIN NOW"""
+    True=content | False=JOIN NOW
+    NOTE: request-list ab HAMESHA check hota hai (flag ki zaroorat nahi) —
+    join-request channel me pending request bheje user ko content milta hai."""
     rd = dict(rd) if not isinstance(rd, dict) else rd
-    # ---- 1) PENDING REQUESTS (join-request wale channels) ----
-    if rd.get("join_request"):
-        r = await _in_requests(client, rd, uid)
-        if r is True:
-            return True
+    # ---- 1) PENDING REQUESTS (hamesha — flag OFF ho to bhi) ----
+    r = await _in_requests(client, rd, uid)
+    if r is True:
+        return True
     # ---- 2) MEMBER/SUBSCRIBER check ----
     m = await _is_member(client, rd, uid)
     if m is True:
@@ -568,9 +569,10 @@ async def deliver(cid, uid, lid, client):
                 for r in frows:
                     rd = dict(r) if not isinstance(r, dict) else r
                     mem = await _is_member(client, rd, uid)
-                    req = await _in_requests(client, rd, uid) if rd.get("join_request") else None
+                    req = await _in_requests(client, rd, uid)
                     dbg.append(f"🔍 {rd.get('title') or rd.get('chat_id')}: "
                                f"member={mem} request={req} "
+                               f"flag={'on' if rd.get('join_request') else 'off'} "
                                f"hash={'✅' if int(rd.get('access_hash') or 0) else '❌'}")
                 msg += "\n\n" + "\n".join(dbg)
         except Exception as e:
