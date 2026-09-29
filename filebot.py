@@ -31,7 +31,7 @@ API_HASH = os.getenv("API_HASH", "")
 TOKEN = os.getenv("FILESTORE_BOT_TOKEN", "").strip()
 DB_URL = os.getenv("DATABASE_URL", "")
 SUPER_OWNER = int(os.getenv("OWNER_ID", "0") or 0)
-UPDATE_LINK = os.getenv("FB_UPDATE_LINK", "-1004362582599").strip()  # link YA -100 channel ID
+UPDATE_LINK = os.getenv("FB_UPDATE_LINK", "https://t.me/+eSfza2-yNXpmNDk1").strip()  # link YA -100 channel ID
 UPDATE_LINK_RAW = UPDATE_LINK
 SYSTEM_FSUB_LINK = os.getenv("FB_SYS_FSUB_LINK", "https://t.me/+_hPJlkI9jNBmMTU1")  # owner ka LOCKED fsub
 
