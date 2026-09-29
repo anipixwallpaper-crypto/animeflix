@@ -369,11 +369,15 @@ async def fsub_not_joined(cid, uid, client):
                                "join_request": False, "system": True,
                                "username": uname, "access_hash": ah})
     rows = await pool.fetch("SELECT * FROM fb_fsub WHERE clone_id=$1", cid)
+    req_skip = sum(1 for r in rows if str(r["chat_id"]) in requested)
     for r in rows:
         if str(r["chat_id"]) in requested:
             continue  # request bhej di — content do!
         if await _is_member(client, r, uid) is False:
             not_joined.append(r)
+    print(f"[filebot] FSUB CHECK: clone={cid} user={uid} channels={len(rows)} "
+          f"req_skip={req_skip} blocked={len(not_joined)} "
+          f"list={[str(r['chat_id']) for r in not_joined]}")
     return not_joined
 
 
