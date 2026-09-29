@@ -346,38 +346,85 @@ async def _is_member(client, r, uid):
     return None
 
 
+async def _request_pending(client, rd, uid):
+    """user ki join request AB BHI pending hai? (Telegram se LIVE verify)
+    Stale records (user leave kar gaya / reject hua / cancel hua) AUTO-DELETE."""
+    try:
+        rows = await pool.fetch("SELECT 1 FROM fb_jreq WHERE chat_id=$1 AND user_id=$2",
+                                str(rd.get("chat_id")), uid)
+        if not rows:
+            return False  # request ka record hi nahi
+    except Exception:
+        return False
+    ok = True
+    try:
+        from pyrogram.raw.functions.messages import GetChatInviteImporters
+        from pyrogram.raw.types import InputPeerChannel, InputUserEmpty
+        s = str(rd.get("chat_id"))
+        ah = int(rd.get("access_hash") or 0)
+        peer = None
+        try:
+            peer = await client.resolve_peer(s)
+        except Exception:
+            if ah and s.lstrip("-").isdigit():
+                cid = int(s[4:]) if s.startswith("-100") else abs(int(s))
+                peer = InputPeerChannel(channel_id=cid, access_hash=ah)
+        if peer is None:
+            return True  # verify nahi ho paya — safe side (content do)
+        r = await client.invoke(GetChatInviteImporters(
+            peer=peer, offset_date=0, offset_user=InputUserEmpty(),
+            limit=100, requested=True))
+        ok = False
+        for imp in (getattr(r, "importers", None) or []):
+            u = getattr(imp, "user", None)
+            if (getattr(imp, "user_id", 0) or (getattr(u, "id", 0) if u else 0)) == uid:
+                ok = True
+                break
+    except Exception as e:
+        print(f"[filebot] req-list err: chat={rd.get('chat_id')} {str(e)[:60]}")
+        return True  # verify fail — safe side (content do)
+    if not ok:
+        try:
+            await pool.execute("DELETE FROM fb_jreq WHERE chat_id=$1 AND user_id=$2",
+                               str(rd.get("chat_id")), uid)
+            print(f"[filebot] STALE request cleaned: user={uid} chat={rd.get('chat_id')}")
+        except Exception:
+            pass
+    return ok
+
+
 async def fsub_not_joined(cid, uid, client):
     """list of fsub rows user ne join nahi kiye — SYSTEM wala hamesha sabse pehle.
-    JOIN REQUEST bhej di ho to WO BHI JOINED maana jayega (content mil jayega)."""
+    Rule: MEMBER hai YA request PENDING hai → content.
+    Leave kar gaya / reject hua / kabhi join nahi kiya → JOIN NOW."""
     not_joined = []
-    # ---- is user ne kisi channel ko request bheji hai? ----
-    requested = set()
-    try:
-        rq = await pool.fetch("SELECT chat_id FROM fb_jreq WHERE user_id=$1", uid)
-        requested = {str(r["chat_id"]) for r in rq}
-    except Exception:
-        pass
     # ---- SYSTEM force sub (owner ka — LOCKED, koi hata nahi sakta) ----
     sysr = await sys_fsub_row()
-    if sysr and main_client and str(sysr["chat_id"]) not in requested:
+    if sysr and main_client:
         uname = await get_setting("sys_fsub_username")
         ah = int(await get_setting("sys_fsub_access_hash", 0) or 0)
         pseudo = {"chat_id": str(sysr["chat_id"]), "username": uname, "access_hash": ah}
-        if await _is_member(main_client, pseudo, uid) is False:
-            not_joined.append({"chat_id": str(sysr["chat_id"]),
-                               "title": sysr["title"], "link": SYSTEM_FSUB_LINK,
-                               "join_request": False, "system": True,
-                               "username": uname, "access_hash": ah})
+        if await _is_member(main_client, pseudo, uid) is not True:
+            if not await _request_pending(main_client, pseudo, uid):
+                not_joined.append({"chat_id": str(sysr["chat_id"]),
+                                   "title": sysr["title"], "link": SYSTEM_FSUB_LINK,
+                                   "join_request": False, "system": True,
+                                   "username": uname, "access_hash": ah})
     rows = await pool.fetch("SELECT * FROM fb_fsub WHERE clone_id=$1", cid)
-    req_skip = sum(1 for r in rows if str(r["chat_id"]) in requested)
+    req_pending = 0
     for r in rows:
-        if str(r["chat_id"]) in requested:
-            continue  # request bhej di — content do!
-        if await _is_member(client, r, uid) is False:
-            not_joined.append(r)
+        rd = dict(r)
+        mem = await _is_member(client, rd, uid)
+        if mem is True:
+            continue  # MEMBER — sab theek
+        if rd.get("join_request") and await _request_pending(client, rd, uid):
+            req_pending += 1
+            continue  # request AB bhi pending — content do
+        if mem is False:
+            not_joined.append(rd)
     print(f"[filebot] FSUB CHECK: clone={cid} user={uid} channels={len(rows)} "
-          f"req_skip={req_skip} blocked={len(not_joined)} "
-          f"list={[str(r['chat_id']) for r in not_joined]}")
+          f"req_pending={req_pending} blocked={len(not_joined)} "
+          f"list={[str(x['chat_id']) for x in not_joined]}")
     return not_joined
 
 
