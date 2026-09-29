@@ -223,6 +223,67 @@ def about_text(clone, bot_name):
     )
 
 
+class _RawEnt:
+    """pyrogram ko RAW entity dena — peer-resolution ke bina
+    (deploy ke baad bhi profile links HAMESHA clickable)"""
+    def __init__(self, raw_entity):
+        self._raw_entity = raw_entity
+
+    async def write(self):
+        return self._raw_entity
+
+
+def about_raw(clone, bot_name):
+    """ABOUT text + RAW entities — tg://user ka peer problem HAMESHA khatam.
+    User mention: InputUser(id, 0) — bots ke liye special (server khud resolve karta hai)."""
+    from pyrogram.raw.types import MessageEntityTextUrl, InputMessageEntityMentionName, InputUser
+    owner_name = clone.get("owner_name") or "Owner"
+    t = "✨ ᴀʙᴏᴜᴛ ᴍᴇ\n\n"
+    ents = []
+
+    def line(prefix, label, url=None, uid=None):
+        nonlocal t
+        off = len(t) + len(prefix)
+        if url:
+            ents.append(_RawEnt(MessageEntityTextUrl(offset=off, length=len(label), url=url)))
+        elif uid:
+            ents.append(_RawEnt(InputMessageEntityMentionName(
+                offset=off, length=len(label),
+                user_id=InputUser(user_id=uid, access_hash=0))))
+        t = t + prefix + label + "\n"
+
+    t = t + f"✰ ᴍʏ ɴᴀᴍᴇ: {bot_name}\n"
+    line("✰ ᴄʟᴏɴᴇ ᴏꜰ: ", "AnimeFlix File Store", url=main_link())
+    line("✰ ᴍʏ ᴏᴡɴᴇʀ: ", owner_name, uid=clone["owner_id"])
+    line("✰ ᴜᴘᴅᴀᴛᴇs: ", "AnimeFlix File Store", url=UPDATE_LINK)
+    line("✰ sᴜᴘᴘᴏʀᴛ: ", "Lovely anime", uid=SUPER_OWNER)
+    line("✰ ᴄᴏɴᴛᴀᴄᴛ ꜰᴏʀ ʙᴏᴛ ᴅᴇᴠᴇʟᴏᴘɪɴɢ: ", "AnimeFlix", uid=SUPER_OWNER)
+    return t.rstrip("\n"), ents
+
+
+async def _send_about(client, chat_id, clone, bot_name, edit_message=None, reply_markup=None):
+    """ABOUT bhejo — RAW entities se (fallback: HTML text)"""
+    text, ents = about_raw(clone, bot_name)
+    try:
+        if edit_message is not None:
+            await edit_message.edit_text(text, entities=ents,
+                                         reply_markup=reply_markup,
+                                         disable_web_page_preview=True)
+        else:
+            await client.send_message(chat_id, text, entities=ents,
+                                      reply_markup=reply_markup,
+                                      disable_web_page_preview=True)
+    except Exception as e:
+        print(f"[filebot] about-raw fail: {str(e)[:80]}")
+        t = about_text(clone, bot_name)
+        if edit_message is not None:
+            await edit_message.edit_text(t, reply_markup=reply_markup,
+                                         disable_web_page_preview=True)
+        else:
+            await client.send_message(chat_id, t, reply_markup=reply_markup,
+                                      disable_web_page_preview=True)
+
+
 def chat_ref(s):
     """'-100123' ya 'username' — jaisa pyrogram ko chahiye"""
     s = str(s)
@@ -354,85 +415,88 @@ async def _is_member(client, r, uid):
     return None
 
 
-async def _request_pending(client, rd, uid):
-    """user ki join request AB BHI pending hai? (Telegram se LIVE verify)
-    Stale records (user leave kar gaya / reject hua / cancel hua) AUTO-DELETE."""
+async def _peer_for(client, rd):
+    """row ke liye peer banao — resolve nahi ho to access_hash se (deploy-proof)"""
+    s = str(rd.get("chat_id"))
     try:
-        rows = await pool.fetch("SELECT 1 FROM fb_jreq WHERE chat_id=$1 AND user_id=$2",
-                                str(rd.get("chat_id")), uid)
-        if not rows:
-            return False  # request ka record hi nahi
+        return await client.resolve_peer(s)
     except Exception:
-        return False
-    ok = True
-    try:
-        from pyrogram.raw.functions.messages import GetChatInviteImporters
-        from pyrogram.raw.types import InputPeerChannel, InputUserEmpty
-        s = str(rd.get("chat_id"))
         ah = int(rd.get("access_hash") or 0)
-        peer = None
-        try:
-            peer = await client.resolve_peer(s)
-        except Exception:
-            if ah and s.lstrip("-").isdigit():
-                cid = int(s[4:]) if s.startswith("-100") else abs(int(s))
-                peer = InputPeerChannel(channel_id=cid, access_hash=ah)
+        if ah and s.lstrip("-").isdigit():
+            from pyrogram.raw.types import InputPeerChannel
+            cid = int(s[4:]) if s.startswith("-100") else abs(int(s))
+            return InputPeerChannel(channel_id=cid, access_hash=ah)
+    return None
+
+
+async def _in_requests(client, rd, uid):
+    """PRIVATE channel ke PENDING join-requests (APPROVAL LIST) me user hai?
+    NOTE: bot APPROVE nahi karta — sirf dekhta hai.
+    True=mila | False=nahi mila | None=list nahi de payi"""
+    try:
+        peer = await _peer_for(client, rd)
         if peer is None:
-            return True  # verify nahi ho paya — safe side (content do)
+            return None
+        from pyrogram.raw.functions.messages import GetChatInviteImporters
+        from pyrogram.raw.types import InputUserEmpty
         r = await client.invoke(GetChatInviteImporters(
             peer=peer, offset_date=0, offset_user=InputUserEmpty(),
             limit=100, requested=True))
-        ok = False
         for imp in (getattr(r, "importers", None) or []):
             u = getattr(imp, "user", None)
             if (getattr(imp, "user_id", 0) or (getattr(u, "id", 0) if u else 0)) == uid:
-                ok = True
-                break
+                return True
+        return False
     except Exception as e:
-        print(f"[filebot] req-list err: chat={rd.get('chat_id')} {str(e)[:60]}")
-        return True  # verify fail — safe side (content do)
-    if not ok:
-        try:
-            await pool.execute("DELETE FROM fb_jreq WHERE chat_id=$1 AND user_id=$2",
-                               str(rd.get("chat_id")), uid)
-            print(f"[filebot] STALE request cleaned: user={uid} chat={rd.get('chat_id')}")
-        except Exception:
-            pass
-    return ok
+        print(f"[filebot] requests-check err: chat={rd.get('chat_id')} {str(e)[:60]}")
+        return None
+
+
+async def fsub_check_user(client, rd, uid):
+    """REWRITTEN force-sub check — OWNER ke rules:
+    1) channel ke REQUEST-APPROVAL list me user hai?  → theek (content do)
+    2) members/subscribers me user hai?               → theek (content do)
+    3) nahi?                                            → JOIN NOW
+    True=content | False=JOIN NOW"""
+    rd = dict(rd) if not isinstance(rd, dict) else rd
+    # ---- 1) PENDING REQUESTS (join-request wale channels) ----
+    if rd.get("join_request"):
+        r = await _in_requests(client, rd, uid)
+        if r is True:
+            return True
+    # ---- 2) MEMBER/SUBSCRIBER check ----
+    m = await _is_member(client, rd, uid)
+    if m is True:
+        return True
+    if m is False:
+        return False
+    # verify nahi ho paya — user ko lock nahi karenge
+    return True
 
 
 async def fsub_not_joined(cid, uid, client):
-    """list of fsub rows user ne join nahi kiye — SYSTEM wala hamesha sabse pehle.
-    Rule: MEMBER hai YA request PENDING hai → content.
-    Leave kar gaya / reject hua / kabhi join nahi kiya → JOIN NOW."""
+    """JOIN NOW dikhane wale fsub rows — SYSTEM (locked) sabse pehle.
+    Bot APPROVE kabhi nahi karta — sirf: request-list → member → JOIN NOW."""
     not_joined = []
-    # ---- SYSTEM force sub (owner ka — LOCKED, koi hata nahi sakta) ----
+    # ---- SYSTEM force sub (owner ka — LOCKED) ----
     sysr = await sys_fsub_row()
     if sysr and main_client:
         uname = await get_setting("sys_fsub_username")
         ah = int(await get_setting("sys_fsub_access_hash", 0) or 0)
-        pseudo = {"chat_id": str(sysr["chat_id"]), "username": uname, "access_hash": ah}
-        if await _is_member(main_client, pseudo, uid) is not True:
-            if not await _request_pending(main_client, pseudo, uid):
-                not_joined.append({"chat_id": str(sysr["chat_id"]),
-                                   "title": sysr["title"], "link": SYSTEM_FSUB_LINK,
-                                   "join_request": False, "system": True,
-                                   "username": uname, "access_hash": ah})
+        pseudo = {"chat_id": str(sysr["chat_id"]), "username": uname,
+                  "access_hash": ah, "join_request": False}
+        if not await fsub_check_user(main_client, pseudo, uid):
+            not_joined.append({"chat_id": str(sysr["chat_id"]),
+                               "title": sysr["title"], "link": SYSTEM_FSUB_LINK,
+                               "join_request": False, "system": True,
+                               "username": uname, "access_hash": ah})
     rows = await pool.fetch("SELECT * FROM fb_fsub WHERE clone_id=$1", cid)
-    req_pending = 0
     for r in rows:
-        rd = dict(r)
-        mem = await _is_member(client, rd, uid)
-        if mem is True:
-            continue  # MEMBER — sab theek
-        if rd.get("join_request") and await _request_pending(client, rd, uid):
-            req_pending += 1
-            continue  # request AB bhi pending — content do
-        if mem is False:
-            not_joined.append(rd)
+        if not await fsub_check_user(client, r, uid):
+            not_joined.append(r)
+    names = [str(x.get("title") or x.get("chat_id")) if isinstance(x, dict) else str(x["chat_id"]) for x in not_joined]
     print(f"[filebot] FSUB CHECK: clone={cid} user={uid} channels={len(rows)} "
-          f"req_pending={req_pending} blocked={len(not_joined)} "
-          f"list={[str(x['chat_id']) for x in not_joined]}")
+          f"blocked={len(not_joined)} list={names}")
     return not_joined
 
 
@@ -626,7 +690,7 @@ async def main_on_message(_, m):
         await pool.execute(
             "UPDATE fb_fsub SET access_hash=$1, username=$2 WHERE clone_id=$3 AND chat_id=$4",
             ah, un, cid, str(fchat.id))
-        await m.reply(f"✅ REPAIR DONE: <b>{fchat.title}</b>\nAb is channel ka JOIN NOW hamesha kaam karega!\n\nAur channel forward karo ya /start")
+        await m.reply(f"✅ REPAIR DONE: <b>{fchat.title}</b>\n<code>ID: {fchat.id}</code>\nAb is channel ka JOIN NOW hamesha kaam karega!\n\nAur channel forward karo ya /start")
         return
 
     # ---- force-sub channel add (link/username paste ya FORWARD kiya) ----
@@ -1358,9 +1422,8 @@ def make_clone_handlers(cid):
             return
 
         if text.startswith("/about"):
-            await _.send_message(
-                uid, about_text(clone, f"@{clone['bot_username']}" if clone["bot_username"] else "File Store Bot"),
-                disable_web_page_preview=True)
+            await _send_about(_, uid, clone,
+                              f"@{clone['bot_username']}" if clone["bot_username"] else "File Store Bot")
             return
 
         if text.startswith("/id"):
@@ -1560,9 +1623,10 @@ def make_clone_handlers(cid):
             if data in ("help",):
                 await cq.message.edit_text(CLONE_HELP, reply_markup=clone_welcome_kb())
             elif data == "about":
-                await cq.message.edit_text(
-                    about_text(clone, f"@{clone['bot_username']}" if clone['bot_username'] else "Bot"),
-                    reply_markup=clone_welcome_kb(), disable_web_page_preview=True)
+                await _send_about(_, uid, clone,
+                                  f"@{clone['bot_username']}" if clone['bot_username'] else "Bot",
+                                  edit_message=cq.message,
+                                  reply_markup=clone_welcome_kb())
             elif data.startswith("try:"):
                 lid = data.split(":", 1)[1]
                 await deliver(cid, uid, lid, _)
