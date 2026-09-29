@@ -320,6 +320,7 @@ async def _is_member(client, r, uid):
     except Exception as e:
         if "PARTICIPANT" in str(e).upper():
             return False
+        print(f"[filebot] member-check err: chat={rd.get('chat_id')} err={str(e)[:70]}")
     # ---- peer session me cached ho to direct check + HASH BACKFILL (self-heal) ----
     try:
         chat_id = rd.get("chat_id")
@@ -340,6 +341,8 @@ async def _is_member(client, r, uid):
     except Exception as e:
         if "PARTICIPANT" in str(e).upper():
             return False
+        if "PEER_ID_INVALID" not in str(e).upper():
+            print(f"[filebot] member-direct err: chat={rd.get('chat_id')} err={str(e)[:70]}")
     return None
 
 
@@ -770,11 +773,27 @@ async def main_on_message(_, m):
         if not link.startswith("https://t.me/"):
             await m.reply("❌ Link https://t.me/... se shuru hona chahiye. Dobara Add Channel karo.")
             return
+        bot_client = clone_clients.get(cid)
+        ah = 0
+        if bot_client:
+            try:
+                p = await bot_client.resolve_peer(chat_ref(str(chat_id)))
+                ah = int(getattr(p, "access_hash", 0) or 0)
+            except Exception:
+                ah = 0
         await pool.execute(
-            "INSERT INTO fb_fsub (clone_id, chat_id, title, link, join_request) "
-            "VALUES ($1,$2,$3,$4,$5) ON CONFLICT (clone_id, chat_id) DO UPDATE SET link=$4",
-            cid, str(chat_id), st.get("title") or "Channel", link, jr)
-        await m.reply("✅ Force-sub channel add ho gaya!")
+            "INSERT INTO fb_fsub (clone_id, chat_id, title, link, join_request, access_hash) "
+            "VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (clone_id, chat_id) DO UPDATE SET link=$4, "
+            "access_hash=CASE WHEN EXCLUDED.access_hash>0 THEN EXCLUDED.access_hash ELSE fb_fsub.access_hash END",
+            cid, str(chat_id), st.get("title") or "Channel", link, jr, ah)
+        if ah:
+            await m.reply("✅ Force-sub channel add ho gaya!")
+        else:
+            await m.reply(
+                "✅ Force-sub channel add ho gaya!\n\n"
+                "⚠️ <b>ZAROORI KAAM:</b> Is channel ki permanent ID abhi save NAHI hui —\n"
+                "<b>FORCE SUB → 🔧 REPAIR</b> kholo aur is channel ka koi bhi message\n"
+                "<b>FORWARD</b> kar do, warna is channel ka JOIN NOW users ko nahi dikhega!")
         return
 
     # ---- moderator add ----
