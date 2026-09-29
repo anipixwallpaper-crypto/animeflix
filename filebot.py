@@ -130,7 +130,8 @@ MAIN_WELCOME = (
     "1️⃣ @BotFather se naya bot banao (/newbot)\n"
     "2️⃣ Jo token mile, yahan paste karo\n"
     "3️⃣ Tumhara bot ready! 🎉\n\n"
-    "⚠️ Max 6 clones per user"
+    "⚠️ Max 6 clones per user\n\n"
+    f"\U0001F4E6 v: {FILEBOT_VERSION}"
 )
 
 # ---------------- helpers ----------------
