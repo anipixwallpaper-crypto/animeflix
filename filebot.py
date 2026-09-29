@@ -31,7 +31,7 @@ API_HASH = os.getenv("API_HASH", "")
 TOKEN = os.getenv("FILESTORE_BOT_TOKEN", "").strip()
 DB_URL = os.getenv("DATABASE_URL", "")
 SUPER_OWNER = int(os.getenv("OWNER_ID", "0") or 0)
-FILEBOT_VERSION = "v29-2 (29 Sep: fs-rewrite + raw-about)"  # /version se dikhta hai
+FILEBOT_VERSION = "v29-3 (29 Sep: direct-first fsub + about resend + owner-debug)"  # /version se dikhta hai
 SUPER_OWNER_USERNAME = None  # owner ka @username (message aane par auto-capture)
 UPDATE_LINK = os.getenv("FB_UPDATE_LINK", "https://t.me/+eSfza2-yNXpmNDk1").strip()  # link YA -100 channel ID
 UPDATE_LINK_RAW = UPDATE_LINK
@@ -366,38 +366,16 @@ def link_kb(url):
 
 async def _is_member(client, r, uid):
     """True=member | False=nahi | None=pata nahi.
-    Username se (public) ya access_hash se (private) — DEPLOY KE BAAD BHI kaam kare.
-    USER_NOT_PARTICIPANT error = member NAHI = False (yahi free-content bug ka fix hai)."""
+    ORDER bilkul SHURU wale jaisa: (1) seedha direct check,
+    (2) username (public), (3) access_hash (private) — deploy ke baad bhi kaam kare.
+    USER_NOT_PARTICIPANT = member NAHI = False."""
     rd = dict(r) if not isinstance(r, dict) else r
-    uname = rd.get("username")
-    if uname:
-        try:
-            m = await client.get_chat_member(uname, uid)
-            return not _is_not_joined(m)
-        except Exception as e:
-            if "PARTICIPANT" in str(e).upper():
-                return False
-    try:
-        s = str(rd.get("chat_id"))
-        cid = int(s[4:]) if s.startswith("-100") else abs(int(s))
-        ah = int(rd.get("access_hash") or 0)
-        if ah:
-            from pyrogram.raw.functions.channels import GetParticipant
-            from pyrogram.raw.types import InputChannel, InputUser
-            await client.invoke(GetParticipant(
-                channel=InputChannel(channel_id=cid, access_hash=ah),
-                participant=InputUser(user_id=uid, access_hash=0)))
-            return True
-    except Exception as e:
-        if "PARTICIPANT" in str(e).upper():
-            return False
-        print(f"[filebot] member-check err: chat={rd.get('chat_id')} err={str(e)[:70]}")
-    # ---- peer session me cached ho to direct check + HASH BACKFILL (self-heal) ----
+
+    # ---- 1) DIRECT CHECK (jaise PEHLE tha) + hash backfill (self-heal) ----
     try:
         chat_id = rd.get("chat_id")
         ref = chat_ref(chat_id) if str(chat_id).lstrip("-").isdigit() else chat_id
         m = await client.get_chat_member(ref, uid)
-        # peer cached mila — permanent ID save kar do taki aage kabhi na toote
         try:
             p = await client.resolve_peer(ref)
             ah2 = int(getattr(p, "access_hash", 0) or 0)
@@ -414,6 +392,33 @@ async def _is_member(client, r, uid):
             return False
         if "PEER_ID_INVALID" not in str(e).upper():
             print(f"[filebot] member-direct err: chat={rd.get('chat_id')} err={str(e)[:70]}")
+
+    # ---- 2) username se (public channels) ----
+    uname = rd.get("username")
+    if uname:
+        try:
+            m = await client.get_chat_member(uname, uid)
+            return not _is_not_joined(m)
+        except Exception as e:
+            if "PARTICIPANT" in str(e).upper():
+                return False
+
+    # ---- 3) access_hash se (private channels) ----
+    try:
+        s = str(rd.get("chat_id"))
+        cid = int(s[4:]) if s.startswith("-100") else abs(int(s))
+        ah = int(rd.get("access_hash") or 0)
+        if ah:
+            from pyrogram.raw.functions.channels import GetParticipant
+            from pyrogram.raw.types import InputChannel, InputUser
+            await client.invoke(GetParticipant(
+                channel=InputChannel(channel_id=cid, access_hash=ah),
+                participant=InputUser(user_id=uid, access_hash=0)))
+            return True
+    except Exception as e:
+        if "PARTICIPANT" in str(e).upper():
+            return False
+        print(f"[filebot] member-check err: chat={rd.get('chat_id')} err={str(e)[:70]}")
     return None
 
 
@@ -553,11 +558,24 @@ async def deliver(cid, uid, lid, client):
         names = "\n".join(
             f"• { (dict(r).get('title') or 'Channel') if not isinstance(r, dict) else (r.get('title') or 'Channel') }"
             for r in frows)
-        await client.send_message(
-            uid,
-            "🔒 <b>Pehle ye channel(s) join karo — phir TRY AGAIN dabao!</b>\n\n"
-            f"{names}",
-            reply_markup=kb)
+        msg = ("🔒 <b>Pehle ye channel(s) join karo — phir TRY AGAIN dabao!</b>\n\n"
+               f"{names}")
+        # ---- OWNER/MOD ke liye AUTO-DEBUG (kaunsa channel kyu block ho raha) ----
+        try:
+            c2 = await load_clone(cid)
+            if uid == SUPER_OWNER or (c2 and uid == c2["owner_id"]) or (c2 and is_clone_mod(c2, uid)):
+                dbg = []
+                for r in frows:
+                    rd = dict(r) if not isinstance(r, dict) else r
+                    mem = await _is_member(client, rd, uid)
+                    req = await _in_requests(client, rd, uid) if rd.get("join_request") else None
+                    dbg.append(f"🔍 {rd.get('title') or rd.get('chat_id')}: "
+                               f"member={mem} request={req} "
+                               f"hash={'✅' if int(rd.get('access_hash') or 0) else '❌'}")
+                msg += "\n\n" + "\n".join(dbg)
+        except Exception as e:
+            print(f"[filebot] owner-dbg err: {str(e)[:60]}")
+        await client.send_message(uid, msg, reply_markup=kb)
         return
     clone = await load_clone(cid)
     ad = clone["auto_delete"] if clone else 0
@@ -1673,9 +1691,12 @@ def make_clone_handlers(cid):
             if data in ("help",):
                 await cq.message.edit_text(CLONE_HELP, reply_markup=clone_welcome_kb())
             elif data == "about":
+                try:
+                    await cq.message.delete()
+                except Exception:
+                    pass
                 await _send_about(_, uid, clone,
                                   f"@{clone['bot_username']}" if clone['bot_username'] else "Bot",
-                                  edit_message=cq.message,
                                   reply_markup=clone_welcome_kb())
             elif data.startswith("try:"):
                 lid = data.split(":", 1)[1]
