@@ -31,7 +31,7 @@ API_HASH = os.getenv("API_HASH", "")
 TOKEN = os.getenv("FILESTORE_BOT_TOKEN", "").strip()
 DB_URL = os.getenv("DATABASE_URL", "")
 SUPER_OWNER = int(os.getenv("OWNER_ID", "0") or 0)
-UPDATE_LINK = os.getenv("FB_UPDATE_LINK", "https://t.me/+MDBQWN7fQgJmZjBl")
+UPDATE_LINK = os.getenv("FB_UPDATE_LINK", "https://t.me/+eSfza2-yNXpmNDk1")
 SYSTEM_FSUB_LINK = os.getenv("FB_SYS_FSUB_LINK", "https://t.me/+_hPJlkI9jNBmMTU1")  # owner ka LOCKED fsub
 
 
@@ -478,10 +478,118 @@ async def main_on_message(_, m):
     if not st:
         return
 
-    # ---- force-sub channel add (link/username paste kiya) ----
+    # ---- fsub REPAIR (forward se purane channel ki permanent ID save) ----
+    if st.get("flow") == "fsubfix":
+        cid = st["cid"]
+        fchat = getattr(m, "forward_from_chat", None)
+        if not fchat:
+            states.pop(sk(uid), None)
+            await m.reply("❌ CHANNEL ka message FORWARD karna hai (copy nahi). FORCE SUB → 🔧 REPAIR se dobara kholo.")
+            return
+        ah = 0
+        try:
+            p = await main_client.resolve_peer(fchat.id)
+            ah = int(getattr(p, "access_hash", 0) or 0)
+        except Exception:
+            pass
+        un = getattr(fchat, "username", None)
+        sysr = await sys_fsub_row()
+        if sysr and str(sysr["chat_id"]) == str(fchat.id):
+            if not ah:
+                await m.reply("⚠️ ID nahi nikli — dobara forward karo.")
+                return
+            await set_setting("sys_fsub_access_hash", ah)
+            if un:
+                await set_setting("sys_fsub_username", un)
+            await m.reply(f"✅ SYSTEM channel REPAIR DONE: <b>{fchat.title}</b>\n\nAur channel forward karo ya /start")
+            return
+        row = await pool.fetchrow("SELECT * FROM fb_fsub WHERE clone_id=$1 AND chat_id=$2",
+                                  cid, str(fchat.id))
+        if not row:
+            await m.reply("❌ Ye channel is clone ki force-sub list me nahi hai — ADD CHANNEL se add karo.\n\nAur repair karne ke liye agla channel forward karo.")
+            return
+        if not ah:
+            await m.reply("⚠️ ID nahi nikli — dobara forward karo.")
+            return
+        await pool.execute(
+            "UPDATE fb_fsub SET access_hash=$1, username=$2 WHERE clone_id=$3 AND chat_id=$4",
+            ah, un, cid, str(fchat.id))
+        await m.reply(f"✅ REPAIR DONE: <b>{fchat.title}</b>\nAb is channel ka JOIN NOW hamesha kaam karega!\n\nAur channel forward karo ya /start")
+        return
+
+    # ---- force-sub channel add (link/username paste ya FORWARD kiya) ----
     if st.get("flow") == "fsubchat":
         cid = st["cid"]
         states.pop(sk(uid), None)
+        fchat = getattr(m, "forward_from_chat", None)
+        if fchat is not None:
+            # FORWARD se add — sabse aasan tarika!
+            bot_client = clone_clients.get(cid)
+            if not bot_client:
+                await m.reply("⚠️ Clone bot offline — 5 min baad dobara try karo (auto-restart hota hai)")
+                return
+            ah = 0
+            try:
+                p = await main_client.resolve_peer(fchat.id)
+                ah = int(getattr(p, "access_hash", 0) or 0)
+            except Exception:
+                pass
+            ok_admin = False
+            try:
+                member = await bot_client.get_chat_member(fchat.id, "me")
+                ok_admin = _is_adminish(member)
+            except Exception:
+                if ah:
+                    try:
+                        from pyrogram.raw.functions.channels import GetParticipant
+                        from pyrogram.raw.types import InputChannel, InputPeerSelf
+                        s0 = str(fchat.id)
+                        cid0 = int(s0[4:]) if s0.startswith("-100") else abs(int(s0))
+                        r0 = await bot_client.invoke(GetParticipant(
+                            channel=InputChannel(channel_id=cid0, access_hash=ah),
+                            participant=InputPeerSelf()))
+                        part = getattr(r0, "participant", None)
+                        ok_admin = part is not None and type(part).__name__ in (
+                            "ChannelParticipantAdmin", "ChannelParticipantCreator")
+                    except Exception:
+                        ok_admin = False
+            if not ok_admin:
+                clone_row = await load_clone(cid)
+                bname = f"@{clone_row['bot_username']}" if clone_row and clone_row.get("bot_username") else "clone bot"
+                await m.reply(
+                    f"⚠️ <b>{bname}</b> (CLONE bot) is channel me ADMIN nahi hai!\n\n"
+                    f"👉 Bot ko channel me ADMIN banao — phir dobara forward karo!")
+                return
+            cnt = await pool.fetchval("SELECT count(*) FROM fb_fsub WHERE clone_id=$1", cid)
+            if cnt >= MAX_FSUB - 1:
+                await m.reply(f"⚠️ Limit full — max {MAX_FSUB - 1} channels (1 system LOCKED slot)")
+                return
+            un = getattr(fchat, "username", None)
+            title = fchat.title or "Channel"
+            if un:
+                pub = f"https://t.me/{un}"
+                await pool.execute(
+                    "INSERT INTO fb_fsub (clone_id, chat_id, title, link, join_request, access_hash, username) "
+                    "VALUES ($1,$2,$3,$4,false,$5,$6) ON CONFLICT (clone_id, chat_id) DO UPDATE SET "
+                    "title=$3, link=$4, access_hash=$5, username=$6",
+                    cid, str(fchat.id), title, pub, ah, un)
+                await m.reply(f"✅ Force-sub ADD: {title}\n🔗 {pub}")
+                return
+            # private → pehle row insert (permanent ID ke saath), phir mode poochho
+            await pool.execute(
+                "INSERT INTO fb_fsub (clone_id, chat_id, title, link, join_request, access_hash) "
+                "VALUES ($1,$2,$3,NULL,false,$4) ON CONFLICT (clone_id, chat_id) DO UPDATE SET "
+                "title=$3, access_hash=$4",
+                cid, str(fchat.id), title, ah)
+            kb = InlineKeyboardMarkup([
+                [InlineKeyboardButton("📨 JOIN REQUEST MODE", callback_data=f"fsubmode:{cid}:{fchat.id}:1")],
+                [InlineKeyboardButton("🔓 NORMAL MODE", callback_data=f"fsubmode:{cid}:{fchat.id}:0")],
+            ])
+            await m.reply(
+                f"Ye PRIVATE channel hai (<b>{title}</b>) — mode chuno:\n\n"
+                "📨 <b>Join Request</b>: users request bhejenge, request ke baad content milega\n"
+                "🔓 <b>Normal</b>: seedha join ho jayenge", reply_markup=kb)
+            return
         raw = text.strip()
         ref = None
         mu = re.match(r"^@([A-Za-z0-9_]{4,})$", raw)
@@ -810,6 +918,7 @@ async def main_on_callback(_, cq):
                         callback_data=f"fsubdel:{cid}:{r['chat_id'].lstrip('-')}")])
                 if len(frows) < MAX_FSUB - 1:
                     kb.append([InlineKeyboardButton("➕ ADD CHANNEL", callback_data=f"fsubadd:{cid}")])
+                kb.append([InlineKeyboardButton("🔧 REPAIR (forward se)", callback_data=f"fsubfix:{cid}")])
                 kb.append([InlineKeyboardButton("🔙 BACK", callback_data=f"clone:{cid}")])
                 await cq.message.edit_text(
                     f"🔒 <b>Force Sub ({len(frows) + 1}/{MAX_FSUB} — 1 LOCKED)</b>\n"
@@ -898,13 +1007,28 @@ async def main_on_callback(_, cq):
             cid = int(data.split(":")[1])
             states[sk(uid)] = {"flow": "fsubchat", "cid": cid}
             await cq.message.edit_text(
-                "📢 <b>Channel/Group add karo — link bhejo:</b>\n\n"
+                "📢 <b>Channel/Group add karo — link bhejo ya channel ka message FORWARD karo:</b>\n\n"
                 "• <code>@username</code>\n"
                 "• <code>https://t.me/username</code>\n"
                 "• <code>https://t.me/c/123456789</code> (channel ka koi bhi post link)\n"
-                "• <code>-100123456789</code> (numeric ID)\n\n"
+                "• <code>-100123456789</code> (numeric ID)\n"
+                "• ya channel ka <b>koi bhi message FORWARD</b> kar do (sabse aasan!)\n\n"
                 "⚠️ Bot us channel me <b>ADMIN</b> hona chahiye!\n\n"
                 "Ab bhejo!")
+            await cq.answer()
+            return
+
+        # fsubfix:cid → purane channels ka REPAIR (forward se permanent ID save)
+        if data.startswith("fsubfix:"):
+            cid = int(data.split(":")[1])
+            states[sk(uid)] = {"flow": "fsubfix", "cid": cid}
+            await cq.message.edit_text(
+                "🔧 <b>REPAIR — Force-sub channels</b>\n\n"
+                "Jis channel ka force-sub theek karna hai, us channel ka\n"
+                "<b>koi bhi ek message yahan FORWARD kar do</b>.\n\n"
+                "Bot us channel ki permanent ID save kar dega — phir JOIN NOW\n"
+                "hamesha sahi dikhega (deploy ke baad bhi).\n\n"
+                "(Ek-ek karke sab channels forward karo)")
             await cq.answer()
             return
 
@@ -971,7 +1095,15 @@ async def main_on_callback(_, cq):
                     p = await bot_client.resolve_peer(cid_int)
                     ah = int(getattr(p, "access_hash", 0) or 0)
                 except Exception:
-                    pass
+                    ah = 0
+                if not ah:
+                    # DB se hash lo (forward-add ne save kiya hoga)
+                    try:
+                        ah = int(await pool.fetchval(
+                            "SELECT access_hash FROM fb_fsub WHERE clone_id=$1 AND chat_id=$2",
+                            cid, str(cid_int)) or 0)
+                    except Exception:
+                        ah = 0
                 link = await _export_link(bot_client, cid_int, join_request=jr, access_hash=ah)
             if not link:
                 states[sk(uid)] = {"flow": "fsublink", "cid": cid, "chat_id": str(cid_int), "jr": jr}
@@ -982,7 +1114,8 @@ async def main_on_callback(_, cq):
                 return
             await pool.execute(
                 "INSERT INTO fb_fsub (clone_id, chat_id, title, link, join_request, access_hash, username) "
-                "VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (clone_id, chat_id) DO NOTHING",
+                "VALUES ($1,$2,$3,$4,$5,$6,$7) ON CONFLICT (clone_id, chat_id) DO UPDATE SET "
+                "title=$3, link=$4, join_request=$5, access_hash=$6, username=$7",
                 cid, str(cid_int), title, link, jr, ah, uname)
             await cq.message.edit_text(f"✅ Force-sub add ho gaya! (mode: {'join-request' if jr else 'normal'})\n🔗 <code>{link}</code>")
             await cq.answer()
