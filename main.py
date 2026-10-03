@@ -70,6 +70,18 @@ async def _unhandled_error(request, exc):
                         content={"detail": f"Server error: {str(exc)[:120]} | {last}"})
 
 
+@app.get("/health")
+async def health():
+    """HALKA health-check — 24/7 keep-alive ping ISI ko bhejo.
+    DB ko chhue bina turant 200 deta hai (isliye sasta + reliable)."""
+    try:
+        import filebot as _fb
+        n = len(getattr(_fb, "clone_clients", {}) or {})
+    except Exception:
+        n = 0
+    return {"ok": True, "app": APP_NAME, "clones_live": n}
+
+
 # ---------------- auth utils ----------------
 
 def make_token(uid: int) -> str:
