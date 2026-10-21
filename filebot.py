@@ -31,7 +31,7 @@ API_HASH = os.getenv("API_HASH", "")
 TOKEN = os.getenv("FILESTORE_BOT_TOKEN", "").strip()
 DB_URL = os.getenv("DATABASE_URL", "")
 SUPER_OWNER = int(os.getenv("OWNER_ID", "0") or 0)
-FILEBOT_VERSION = "v30 (29 Sep: force-sub core REWRITE — live request-list + record fallback + exact error)"  # /version se dikhta hai
+FILEBOT_VERSION = "v30-1 (21 Oct: DB SSL + Supabase-ready connection)"  # /version se dikhta hai
 SUPER_OWNER_USERNAME = None  # owner ka @username (message aane par auto-capture)
 UPDATE_LINK = os.getenv("FB_UPDATE_LINK", "https://t.me/+eSfza2-yNXpmNDk1").strip()  # link YA -100 channel ID
 UPDATE_LINK_RAW = UPDATE_LINK
@@ -1848,7 +1848,17 @@ async def start():
     if not DB_URL or not API_ID or not API_HASH:
         print("[filebot] API_ID/API_HASH/DATABASE_URL missing — file bot OFF")
         return
-    pool = await asyncpg.create_pool(DB_URL, statement_cache_size=0, min_size=1, max_size=5)
+    # ---- DB URL ko Supabase/Neon ke liye taiyaar karo (SSL + query-string safe) ----
+    _dburl = DB_URL
+    if _dburl.startswith("postgres://"):
+        _dburl = _dburl.replace("postgres://", "postgresql://", 1)
+    _pool_kw = {"statement_cache_size": 0, "min_size": 1, "max_size": 5}
+    if _dburl.startswith("postgresql"):
+        if "?" in _dburl:
+            _dburl = _dburl.split("?")[0]
+        _pool_kw["ssl"] = "require"
+    pool = await asyncpg.create_pool(_dburl, **_pool_kw)
+    print(f"[filebot] DB connected -> {_dburl.split('@')[-1][:45]}")
     await pool.execute("""
         CREATE TABLE IF NOT EXISTS fb_clones (
             id SERIAL PRIMARY KEY,
